@@ -117,8 +117,8 @@
    client-side — RLS (enable_auth_rls.sql) is what actually restricts
    access, not the key itself.
    ===================================================================== */
-const SUPABASE_URL = 'https://hemwfmxgclkoxlidqksm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlbXdmbXhnY2xrb3hsaWRxa3NtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4ODIzNjA0MSwiZXhwIjoyMTAzODEyMDQxfQ.TIWVW45pcPyeNlKzoxWM-HWf3nONQZi7GgzRP5jirkU';
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -478,31 +478,75 @@ const ORDER_TYPE_TABS = [
   {key:'transfer', label:'Transfer'},
 ];
 let obTypeTab='direct', obStatusTab='All';
+let obSearchTerm='';
+let obFilters={ customer:'', agent:'', product:'', dateFrom:'', dateTo:'' };
+let obFiltersOpen=false;
 let cachedOrderRows = [];
 
 async function fetchOrderBookRows(){
-  const [containersRes, whOrdersRes, transfersRes] = await Promise.all([
-    sb.from('containers').select('id,order_no,container_no,order_date,status,invoice_value_gbp,destination_warehouse_id,customer_id'),
-    sb.from('warehouse_orders').select('id,order_no,order_date,status,invoice_value_gbp,warehouse_id,customer_id'),
+  const [containersRes, whOrdersRes, transfersRes, cItemsRes, woItemsRes] = await Promise.all([
+    sb.from('containers').select('id,order_no,container_no,order_date,delivery_address,customer_requested_date,expected_delivery_date,delivered_date,invoice_no,remarks,agent_id,status,invoice_value_gbp,destination_warehouse_id,customer_id'),
+    sb.from('warehouse_orders').select('id,order_no,order_date,delivery_address,customer_requested_date,expected_delivery_date,delivered_date,invoice_no,remarks,agent_id,status,invoice_value_gbp,warehouse_id,customer_id'),
     sb.from('warehouse_transfers').select('id,reference_no,transfer_date,from_warehouse_id,to_warehouse_id'),
+    sb.from('container_items').select('container_id,product_id,quantity'),
+    sb.from('warehouse_order_items').select('warehouse_order_id,product_id,quantity'),
   ]);
+
+  // group items by order id, building the same "consolidated" comma-joined
+  // summary the old AppSheet columns showed (Product Category (Consolidated) /
+  // Quantity (Consolidated)), computed here instead of stored redundantly
+  const itemsByOrder = {};
+  (cItemsRes.data||[]).forEach(it=>{
+    (itemsByOrder[it.container_id] = itemsByOrder[it.container_id] || []).push(it);
+  });
+  (woItemsRes.data||[]).forEach(it=>{
+    (itemsByOrder[it.warehouse_order_id] = itemsByOrder[it.warehouse_order_id] || []).push(it);
+  });
+  function consolidated(orderId){
+    const its = itemsByOrder[orderId] || [];
+    return {
+      products: its.map(i=>productName(i.product_id)).join(', '),
+      qtys: its.map(i=>i.quantity).join(', '),
+    };
+  }
+
   const rows = [];
-  (containersRes.data||[]).forEach(c=>rows.push({
-    typeKey: c.destination_warehouse_id?'warehouse_bound':'direct',
-    type: c.destination_warehouse_id?'Container → warehouse':'Direct container',
-    id: c.order_no, refId: c.id, isLocal:false,
-    who: c.destination_warehouse_id?warehouseName(c.destination_warehouse_id):customerName(c.customer_id),
-    date: c.order_date, status: c.status, value: c.invoice_value_gbp,
-  }));
-  (whOrdersRes.data||[]).forEach(o=>rows.push({
-    typeKey:'local', type:'Local delivery', id:o.order_no, refId:o.id, isLocal:true,
-    who: customerName(o.customer_id)+' ← '+warehouseName(o.warehouse_id),
-    date:o.order_date, status:o.status, value:o.invoice_value_gbp,
-  }));
+  (containersRes.data||[]).forEach(c=>{
+    const cons = consolidated(c.id);
+    rows.push({
+      typeKey: c.destination_warehouse_id?'warehouse_bound':'direct',
+      type: c.destination_warehouse_id?'Container → warehouse':'Direct container',
+      id: c.order_no, refId: c.id, isLocal:false,
+      customerName: c.destination_warehouse_id?warehouseName(c.destination_warehouse_id):customerName(c.customer_id),
+      who: c.destination_warehouse_id?warehouseName(c.destination_warehouse_id):customerName(c.customer_id),
+      agentName: agentName(c.agent_id),
+      date: c.order_date, status: c.status, value: c.invoice_value_gbp,
+      deliveryAddress: c.delivery_address, customerRequestedDate: c.customer_requested_date,
+      expectedDeliveryDate: c.expected_delivery_date, deliveredDate: c.delivered_date,
+      invoiceNo: c.invoice_no, remarks: c.remarks,
+      products: cons.products, qtys: cons.qtys,
+    });
+  });
+  (whOrdersRes.data||[]).forEach(o=>{
+    const cons = consolidated(o.id);
+    rows.push({
+      typeKey:'local', type:'Local delivery', id:o.order_no, refId:o.id, isLocal:true,
+      customerName: customerName(o.customer_id),
+      who: customerName(o.customer_id)+' ← '+warehouseName(o.warehouse_id),
+      agentName: agentName(o.agent_id),
+      date:o.order_date, status:o.status, value:o.invoice_value_gbp,
+      deliveryAddress: o.delivery_address, customerRequestedDate: o.customer_requested_date,
+      expectedDeliveryDate: o.expected_delivery_date, deliveredDate: o.delivered_date,
+      invoiceNo: o.invoice_no, remarks: o.remarks,
+      products: cons.products, qtys: cons.qtys,
+    });
+  });
   (transfersRes.data||[]).forEach(t=>rows.push({
     typeKey:'transfer', type:'Transfer', id:t.reference_no||t.id, refId:t.id, isLocal:null,
-    who: warehouseName(t.from_warehouse_id)+' → '+warehouseName(t.to_warehouse_id),
-    date:t.transfer_date, status:'Processed', value:null,
+    customerName:'', who: warehouseName(t.from_warehouse_id)+' → '+warehouseName(t.to_warehouse_id),
+    agentName:'', date:t.transfer_date, status:'Processed', value:null,
+    deliveryAddress:'', customerRequestedDate:'', expectedDeliveryDate:'', deliveredDate:'',
+    invoiceNo:'', remarks:'', products:'', qtys:'',
   }));
   return rows.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
 }
@@ -513,17 +557,49 @@ async function renderOrderList(){
   cachedOrderRows = await fetchOrderBookRows();
   drawOrderList();
 }
+function matchesSearch(r, term){
+  if(!term) return true;
+  const hay = [r.id, r.customerName, r.who, r.agentName, r.products, r.deliveryAddress,
+    r.invoiceNo, r.remarks].join(' ').toLowerCase();
+  return hay.includes(term.toLowerCase());
+}
+function matchesFilters(r, f){
+  if(f.customer && r.customerName !== f.customer) return false;
+  if(f.agent && r.agentName !== f.agent) return false;
+  if(f.product && !(r.products||'').toLowerCase().includes(f.product.toLowerCase())) return false;
+  if(f.dateFrom && (!r.date || r.date < f.dateFrom)) return false;
+  if(f.dateTo && (!r.date || r.date > f.dateTo)) return false;
+  return true;
+}
+
 function drawOrderList(){
   const el = document.getElementById('view-orderlist');
   const allRows = cachedOrderRows;
   const typeRows = allRows.filter(r=>r.typeKey===obTypeTab);
   const hasStatusTabs = obTypeTab !== 'transfer';
   const statusTabs = hasStatusTabs ? ['All', ...ALL_STATUSES] : null;
-  const visibleRows = hasStatusTabs && obStatusTab!=='All' ? typeRows.filter(r=>r.status===obStatusTab) : typeRows;
+  let visibleRows = hasStatusTabs && obStatusTab!=='All' ? typeRows.filter(r=>r.status===obStatusTab) : typeRows;
+  visibleRows = visibleRows.filter(r=>matchesSearch(r, obSearchTerm) && matchesFilters(r, obFilters));
+
+  const customerOptionsForFilter = [...new Set(typeRows.map(r=>r.customerName).filter(Boolean))].sort();
+  const agentOptionsForFilter = [...new Set(typeRows.map(r=>r.agentName).filter(Boolean))].sort();
+  const activeFilterCount = Object.values(obFilters).filter(Boolean).length;
 
   el.innerHTML = `<div class="card">
     <h2>Order book (${allRows.length})</h2>
     <p class="helptext" style="margin-bottom:14px">Click any order to open it and edit real data — every change here writes to Supabase.</p>
+    <div class="field-row" style="margin-bottom:12px">
+      <div class="field" style="flex:2"><input type="text" id="ob-search" placeholder="Search customer, order no., product, address, remarks…" value="${obSearchTerm}"></div>
+      <div class="field" style="flex:0 0 auto"><button class="btn secondary" id="ob-filters-toggle">Filters${activeFilterCount?` (${activeFilterCount})`:''}</button></div>
+    </div>
+    ${obFiltersOpen ? `<div class="field-row" style="background:var(--field-bg);padding:12px;border-radius:2px;margin-bottom:12px">
+      <div class="field"><label>Customer</label><select id="ob-f-customer"><option value="">— all —</option>${customerOptionsForFilter.map(c=>`<option ${c===obFilters.customer?'selected':''}>${c}</option>`).join('')}</select></div>
+      <div class="field"><label>Agent</label><select id="ob-f-agent"><option value="">— all —</option>${agentOptionsForFilter.map(a=>`<option ${a===obFilters.agent?'selected':''}>${a}</option>`).join('')}</select></div>
+      <div class="field"><label>Product contains</label><input type="text" id="ob-f-product" value="${obFilters.product}" placeholder="e.g. Footlove"></div>
+      <div class="field"><label>Order date from</label><input type="date" id="ob-f-datefrom" value="${obFilters.dateFrom}"></div>
+      <div class="field"><label>Order date to</label><input type="date" id="ob-f-dateto" value="${obFilters.dateTo}"></div>
+      <div class="field" style="flex:0 0 auto;justify-content:flex-end"><button class="btn small secondary" id="ob-filters-clear" style="margin-top:16px">Clear filters</button></div>
+    </div>` : ''}
     <div class="order-type-tabs">${ORDER_TYPE_TABS.map(t=>{
       const n = allRows.filter(r=>r.typeKey===t.key).length;
       return `<button data-t="${t.key}" class="${obTypeTab===t.key?'active':''}">${t.label} (${n})</button>`;
@@ -532,16 +608,33 @@ function drawOrderList(){
       const n = s==='All'?typeRows.length:typeRows.filter(r=>r.status===s).length;
       return `<button data-s="${s}" class="${obStatusTab===s?'active':''}">${s} (${n})</button>`;
     }).join('')}</div>` : ''}
-    ${visibleRows.length? `<table><thead><tr><th>Reference</th><th>Route</th><th>Order date</th><th>Status</th><th class="num">Value</th></tr></thead>
+    ${visibleRows.length? `<table><thead><tr><th>Reference</th><th>${obTypeTab==='transfer'?'Route':'Customer'}</th>
+      <th>Products</th><th>Qty</th><th>Delivery address</th><th>Order date</th><th>Status</th><th class="num">Value</th></tr></thead>
     <tbody>${visibleRows.map((r,i)=>`<tr class="order-row" data-idx="${i}"><td class="mono"><span style="color:var(--accent-ink);text-decoration:underline">${r.id}</span></td>
-      <td>${r.who}</td><td class="mono">${r.date||''}</td>
+      <td>${r.who}</td>
+      <td style="max-width:220px">${r.products||'—'}</td>
+      <td class="mono">${r.qtys||'—'}</td>
+      <td>${r.deliveryAddress||'—'}</td>
+      <td class="mono">${r.date||''}</td>
       <td><span class="badge ${DELIVERED_OR_LATER.includes(r.status)||r.status==='Processed'?'delivered':''}">${r.status}</span></td>
       <td class="num">${r.value===null?'—':fmt(r.value)}</td></tr>`).join('')}</tbody></table>`
-    : `<div class="empty">No orders in this status.</div>`}
+    : `<div class="empty">No orders match${obSearchTerm||activeFilterCount?' your search/filters':' this status'}.</div>`}
   </div>`;
 
   el.querySelectorAll('.order-type-tabs button').forEach(b=>b.addEventListener('click', ()=>{ obTypeTab=b.dataset.t; obStatusTab='All'; drawOrderList(); }));
   el.querySelectorAll('.subtabs button').forEach(b=>b.addEventListener('click', ()=>{ obStatusTab=b.dataset.s; drawOrderList(); }));
+  document.getElementById('ob-search').addEventListener('input', e=>{ obSearchTerm=e.target.value; drawOrderList(); });
+  document.getElementById('ob-search').focus();
+  document.getElementById('ob-search').setSelectionRange(obSearchTerm.length, obSearchTerm.length);
+  document.getElementById('ob-filters-toggle').addEventListener('click', ()=>{ obFiltersOpen=!obFiltersOpen; drawOrderList(); });
+  if(obFiltersOpen){
+    document.getElementById('ob-f-customer').addEventListener('change', e=>{ obFilters.customer=e.target.value; drawOrderList(); });
+    document.getElementById('ob-f-agent').addEventListener('change', e=>{ obFilters.agent=e.target.value; drawOrderList(); });
+    document.getElementById('ob-f-product').addEventListener('input', e=>{ obFilters.product=e.target.value; drawOrderList(); });
+    document.getElementById('ob-f-datefrom').addEventListener('change', e=>{ obFilters.dateFrom=e.target.value; drawOrderList(); });
+    document.getElementById('ob-f-dateto').addEventListener('change', e=>{ obFilters.dateTo=e.target.value; drawOrderList(); });
+    document.getElementById('ob-filters-clear').addEventListener('click', ()=>{ obFilters={customer:'',agent:'',product:'',dateFrom:'',dateTo:''}; drawOrderList(); });
+  }
   el.querySelectorAll('.order-row').forEach(tr=>tr.addEventListener('click', ()=>{
     const r = visibleRows[+tr.dataset.idx];
     if(r.typeKey==='transfer') return; // transfers process instantly, nothing to open
