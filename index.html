@@ -117,8 +117,8 @@
    client-side — RLS (enable_auth_rls.sql) is what actually restricts
    access, not the key itself.
    ===================================================================== */
-const SUPABASE_URL = 'https://hemwfmxgclkoxlidqksm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlbXdmbXhnY2xrb3hsaWRxa3NtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4ODIzNjA0MSwiZXhwIjoyMTAzODEyMDQxfQ.TIWVW45pcPyeNlKzoxWM-HWf3nONQZi7GgzRP5jirkU';
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -170,23 +170,34 @@ sb.auth.onAuthStateChange((event, session)=>{
    happen in Postgres (triggers), never in this file.
    ===================================================================== */
 let PRODUCTS=[], CUSTOMERS=[], AGENTS=[], WAREHOUSES=[], PRODUCTION_UNITS=[];
+let CUSTOMER_ADDRESSES=[]; // {customer_id, address, is_default}
+let CUSTOMER_DEFAULT_AGENT={}; // customer_id -> agent_id, from the most recent commission mapping
 
 async function loadReferenceData(){
-  const [p, c, a, w, u] = await Promise.all([
+  const [p, c, a, w, u, ca, cac] = await Promise.all([
     sb.from('products').select('id,sku_name').eq('is_active', true).order('sku_name'),
     sb.from('customers').select('id,name,is_warehouse_destination,linked_warehouse_id').order('name'),
     sb.from('agents').select('id,name').order('name'),
     sb.from('warehouses').select('id,name').eq('is_active', true).order('name'),
     sb.from('production_units').select('id,name').eq('is_active', true).order('name'),
+    sb.from('customer_delivery_addresses').select('customer_id,address,is_default'),
+    sb.from('customer_agent_commission').select('customer_id,agent_id,effective_date').order('effective_date', {ascending:false}),
   ]);
   PRODUCTS = p.data || []; CUSTOMERS = c.data || []; AGENTS = a.data || [];
   WAREHOUSES = w.data || []; PRODUCTION_UNITS = u.data || [];
+  CUSTOMER_ADDRESSES = ca.data || [];
+  CUSTOMER_DEFAULT_AGENT = {};
+  (cac.data || []).forEach(row => {
+    // sorted by effective_date desc above, so the first hit per customer is the current agent
+    if(!(row.customer_id in CUSTOMER_DEFAULT_AGENT)) CUSTOMER_DEFAULT_AGENT[row.customer_id] = row.agent_id;
+  });
 }
 function productName(id){ return PRODUCTS.find(x=>x.id===id)?.sku_name || id; }
 function customerName(id){ return CUSTOMERS.find(x=>x.id===id)?.name || id; }
 function agentName(id){ return AGENTS.find(x=>x.id===id)?.name || '—'; }
 function warehouseName(id){ return WAREHOUSES.find(x=>x.id===id)?.name || id; }
 function unitName(id){ return PRODUCTION_UNITS.find(x=>x.id===id)?.name || '—'; }
+function addressesForCustomer(customerId){ return CUSTOMER_ADDRESSES.filter(a=>a.customer_id===customerId); }
 function optionsHtml(list, labelFn, selected){
   return list.map(x=>`<option value="${x.id}" ${x.id===selected?'selected':''}>${labelFn(x)}</option>`).join('');
 }
@@ -239,6 +250,7 @@ function renderOrderForm(today){
   const isLocal = currentOrderType==='local';
   const isWarehouseBound = currentOrderType==='warehouse_bound';
   const customerOptions = isWarehouseBound ? CUSTOMERS.filter(c=>c.is_warehouse_destination) : CUSTOMERS.filter(c=>!c.is_warehouse_destination);
+  const defaultUnitId = PRODUCTION_UNITS.find(u=>u.name==='Silvassa')?.id;
 
   formCard.innerHTML = `
     <h2>${ {direct:'Direct container', warehouse_bound:'Container to warehouse', local:'Local delivery order', transfer:'Inter-warehouse transfer'}[currentOrderType] }</h2>
@@ -252,12 +264,16 @@ function renderOrderForm(today){
     </div>
     ${!isTransfer ? `<div class="field-row">
       <div class="field"><label>Customer order ID</label><input type="text" id="f-cust-order-id" placeholder="e.g. PO-4471"></div>
-      <div class="field"><label>Delivery address</label><input type="text" id="f-delivery-address"></div>
+      <div class="field">
+        <label>Delivery address</label>
+        <select id="f-address-picker" style="margin-bottom:5px;display:none"></select>
+        <input type="text" id="f-delivery-address">
+      </div>
       <div class="field"><label>Customer requested date</label><input type="date" id="f-requested-date" value="${today}"></div>
       <div class="field"><label>Expected delivery date</label><input type="date" id="f-expected-date" value="${today}"></div>
     </div>` : ''}
     ${!isTransfer && !isLocal ? `<div class="field-row">
-      <div class="field"><label>Source plant</label><select id="f-source-unit">${optionsHtml(PRODUCTION_UNITS,u=>u.name)}</select></div>
+      <div class="field"><label>Source plant</label><select id="f-source-unit">${optionsHtml(PRODUCTION_UNITS,u=>u.name,defaultUnitId)}</select></div>
       <div class="field"><label>Expected stuffing date</label><input type="date" id="f-stuffing-date"></div>
       <div class="field"><label>Vessel date</label><input type="date" id="f-vessel-date"></div>
     </div>` : ''}
@@ -293,6 +309,48 @@ function renderOrderForm(today){
   });
   formCard.querySelectorAll('input,select').forEach(inp=>inp.addEventListener('input', updateOrderSummary));
   document.getElementById('submit-order-btn').addEventListener('click', submitOrder);
+
+  // Auto-fill delivery address (dropdown if multiple on file) + auto-select
+  // the customer's current agent (from customer_agent_commission) —
+  // applies to whichever select actually represents "the customer" for
+  // this order type: f-primary for direct/warehouse-bound, f-customer for local.
+  if(!isTransfer){
+    const custSelectId = isLocal ? 'f-customer' : 'f-primary';
+    const custSelect = document.getElementById(custSelectId);
+    if(custSelect){
+      custSelect.addEventListener('change', ()=>onOrderCustomerChanged(custSelect.value));
+      if(custSelect.value) onOrderCustomerChanged(custSelect.value);
+    }
+    document.getElementById('f-address-picker').addEventListener('change', e=>{
+      document.getElementById('f-delivery-address').value = e.target.value;
+      updateOrderSummary();
+    });
+  }
+  updateOrderSummary();
+}
+
+function onOrderCustomerChanged(customerId){
+  const picker = document.getElementById('f-address-picker');
+  const addrInput = document.getElementById('f-delivery-address');
+  const agentSelect = document.getElementById('f-agent');
+  const addrs = addressesForCustomer(customerId);
+
+  if(addrs.length > 1){
+    picker.style.display = '';
+    picker.innerHTML = addrs.map(a=>`<option value="${a.address}" ${a.is_default?'selected':''}>${a.address}</option>`).join('');
+    addrInput.value = (addrs.find(a=>a.is_default) || addrs[0]).address;
+  } else if(addrs.length === 1){
+    picker.style.display = 'none';
+    addrInput.value = addrs[0].address;
+  } else {
+    picker.style.display = 'none';
+    addrInput.value = '';
+  }
+
+  if(agentSelect){
+    const agentId = CUSTOMER_DEFAULT_AGENT[customerId];
+    agentSelect.value = agentId || '';
+  }
   updateOrderSummary();
 }
 
@@ -424,20 +482,20 @@ let cachedOrderRows = [];
 
 async function fetchOrderBookRows(){
   const [containersRes, whOrdersRes, transfersRes] = await Promise.all([
-    sb.from('containers').select('id,container_no,order_date,status,invoice_value_gbp,destination_warehouse_id,customer_id'),
-    sb.from('warehouse_orders').select('id,order_date,status,invoice_value_gbp,warehouse_id,customer_id'),
+    sb.from('containers').select('id,order_no,container_no,order_date,status,invoice_value_gbp,destination_warehouse_id,customer_id'),
+    sb.from('warehouse_orders').select('id,order_no,order_date,status,invoice_value_gbp,warehouse_id,customer_id'),
     sb.from('warehouse_transfers').select('id,reference_no,transfer_date,from_warehouse_id,to_warehouse_id'),
   ]);
   const rows = [];
   (containersRes.data||[]).forEach(c=>rows.push({
     typeKey: c.destination_warehouse_id?'warehouse_bound':'direct',
     type: c.destination_warehouse_id?'Container → warehouse':'Direct container',
-    id: c.container_no, refId: c.id, isLocal:false,
+    id: c.order_no, refId: c.id, isLocal:false,
     who: c.destination_warehouse_id?warehouseName(c.destination_warehouse_id):customerName(c.customer_id),
     date: c.order_date, status: c.status, value: c.invoice_value_gbp,
   }));
   (whOrdersRes.data||[]).forEach(o=>rows.push({
-    typeKey:'local', type:'Local delivery', id:o.id, refId:o.id, isLocal:true,
+    typeKey:'local', type:'Local delivery', id:o.order_no, refId:o.id, isLocal:true,
     who: customerName(o.customer_id)+' ← '+warehouseName(o.warehouse_id),
     date:o.order_date, status:o.status, value:o.invoice_value_gbp,
   }));
@@ -528,7 +586,7 @@ function closeOrderDetail(){
 function renderOrderDetail(){
   const el = document.getElementById('view-orderdetail');
   const { isLocal, order: o, items } = detailTarget;
-  const referenceLabel = isLocal ? o.id : o.container_no;
+  const referenceLabel = o.order_no || o.id;
   const wasProcessed = isLocal ? items.some(it=>it.snapshot_written_at) : DELIVERED_OR_LATER.includes(o.status);
 
   el.innerHTML = `
@@ -568,6 +626,9 @@ function renderOrderDetail(){
           <div class="field"><label>Source plant</label><select id="d-source-unit"><option value="">— not recorded —</option>${optionsHtml(PRODUCTION_UNITS,u=>u.name,o.source_unit_id)}</select></div>
           <div class="field"><label>Expected stuffing date</label><input type="date" id="d-stuffing-date" value="${o.expected_stuffing_date||''}"></div>
           <div class="field"><label>Vessel date</label><input type="date" id="d-vessel-date" value="${o.vessel_date||''}"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Container no. <span style="font-weight:400;color:var(--ink-soft)">(the real shipping container — fill in once it's actually stuffed/dispatched)</span></label><input type="text" id="d-container-no" value="${o.container_no||''}" placeholder="e.g. MSCU1234567"></div>
         </div>
         ${!o.source_unit_id ? `<div class="warn-box">No source plant recorded — ex-factory price lookup falls back to any unit's most recent price.</div>` : ''}` : `<div class="field-row">
           <div class="field"><label>Dispatch warehouse</label><div class="mono" style="padding:8px 0">${warehouseName(o.warehouse_id)}</div></div>
@@ -658,6 +719,7 @@ async function saveOrderDetail(){
     if(!isLocal){
       updatePayload.logistics_cost_gbp = +(document.getElementById('d-logistics')?.value||0);
       updatePayload.source_unit_id = document.getElementById('d-source-unit')?.value || null;
+      updatePayload.container_no = document.getElementById('d-container-no')?.value || null;
       updatePayload.expected_stuffing_date = document.getElementById('d-stuffing-date')?.value || null;
       updatePayload.vessel_date = document.getElementById('d-vessel-date')?.value || null;
     } else {
@@ -759,14 +821,14 @@ function drawDashboardContent(data){
   } else if(dashSubtab==='direct'){
     content.innerHTML = `<h2>Direct-to-customer P&amp;L</h2>
       ${direct.length? `<table><thead><tr><th>Container</th><th>Customer</th><th class="num">Rolls</th><th class="num">Cost</th><th class="num">Invoice</th><th class="num">Profit</th></tr></thead>
-      <tbody>${direct.map(r=>`<tr><td class="mono">${r.container_no}</td><td>${r.customer_name}</td><td class="num">${r.total_rolls}</td>
+      <tbody>${direct.map(r=>`<tr><td class="mono">${r.order_no}</td><td>${r.customer_name}</td><td class="num">${r.total_rolls}</td>
         <td class="num">${fmt(r.total_cost_gbp)}</td><td class="num">${fmt(r.invoice_value_gbp)}</td>
         <td class="num ${r.profit_gbp>=0?'pos':'neg'}">${fmt(r.profit_gbp)}</td></tr>`).join('')}</tbody></table>`
       : `<div class="empty">No direct containers yet.</div>`}`;
   } else {
     content.innerHTML = `<h2>Local delivery P&amp;L</h2>
       ${local.length? `<table><thead><tr><th>Order</th><th>Customer</th><th>Product</th><th class="num">Qty</th><th class="num">Cost</th><th class="num">Invoice</th><th class="num">Profit</th></tr></thead>
-      <tbody>${local.map(r=>`<tr><td class="mono">${r.warehouse_order_id}</td><td>${r.customer_name}</td><td>${r.sku_name}</td>
+      <tbody>${local.map(r=>`<tr><td class="mono">${r.order_no}</td><td>${r.customer_name}</td><td>${r.sku_name}</td>
         <td class="num">${r.quantity}</td><td class="num">${fmt(r.fully_loaded_cost_gbp)}</td><td class="num">${fmt(r.line_total_gbp)}</td>
         <td class="num ${r.profit_gbp>=0?'pos':'neg'}">${fmt(r.profit_gbp)}</td></tr>`).join('')}</tbody></table>`
       : `<div class="empty">No delivered local orders yet.</div>`}`;
