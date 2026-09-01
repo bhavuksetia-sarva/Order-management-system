@@ -117,13 +117,13 @@
    client-side — RLS (enable_auth_rls.sql) is what actually restricts
    access, not the key itself.
    ===================================================================== */
-const SUPABASE_URL = 'https://hemwfmxgclkoxlidqksm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlbXdmbXhnY2xrb3hsaWRxa3NtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyMzYwNDEsImV4cCI6MjEwMzgxMjA0MX0.dIFesWe0j8-RpMnQDbcuVbSHZXeeDMVJd3GQ70brfXI';
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-const ALL_STATUSES = ['Pending','In Production','In Transit','Delivered','Delivered and paid','Cancelled'];
-const DELIVERED_OR_LATER = ['Delivered','Delivered and paid'];
+const ALL_STATUSES = ['Pending','In Production','Goods Ready','In Transit','Delivered','Paid','Cancelled'];
+const DELIVERED_OR_LATER = ['Delivered','Paid'];
 
 function fmt(n){ if(n===null||n===undefined||isNaN(n)) return '—'; return '£'+Number(n).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}); }
 function todayStr(){ return new Date().toISOString().slice(0,10); }
@@ -577,7 +577,7 @@ function renderOrderDetail(){
         <div class="field-row"><div class="field"><label>Remarks</label><input type="text" id="d-remarks" value="${o.remarks||''}"></div></div>
 
         ${wasProcessed ? `<p class="helptext">This order's cost/ledger figures are already computed and frozen. Editing quantities here won't recompute them.</p>`
-          : `<p class="helptext">Dispatched quantity can differ from ordered. Saving with status Delivered / Delivered and paid uses whatever is entered here.</p>`}
+          : `<p class="helptext">Dispatched quantity can differ from ordered. Saving with status Delivered / Paid uses whatever is entered here.</p>`}
         <h2 style="margin-top:18px">Related Order Items</h2>
         <table><thead><tr><th>Product</th><th class="num">Quantity</th><th class="num">Dispatched</th><th class="num">Special price</th><th></th></tr></thead>
           <tbody id="detail-items-body"></tbody></table>
@@ -639,6 +639,7 @@ async function saveOrderDetail(){
   saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
 
   try{
+    const newStatus = document.getElementById('d-status').value;
     const updatePayload = {
       agent_id: document.getElementById('d-agent').value || null,
       customer_order_id: document.getElementById('d-cust-order-id').value || null,
@@ -648,8 +649,12 @@ async function saveOrderDetail(){
       order_date: document.getElementById('d-order-date').value,
       total_discount_gbp: +(document.getElementById('d-discount').value||0),
       remarks: document.getElementById('d-remarks').value || null,
-      status: document.getElementById('d-status').value,
+      status: newStatus,
     };
+    const today = todayStr();
+    if(newStatus === 'In Transit' && !o.dispatch_date) updatePayload.dispatch_date = today;
+    if(DELIVERED_OR_LATER.includes(newStatus) && !o.delivered_date) updatePayload.delivered_date = today;
+    if(newStatus === 'Paid' && !o.paid_date) updatePayload.paid_date = today;
     if(!isLocal){
       updatePayload.logistics_cost_gbp = +(document.getElementById('d-logistics')?.value||0);
       updatePayload.source_unit_id = document.getElementById('d-source-unit')?.value || null;
@@ -662,6 +667,7 @@ async function saveOrderDetail(){
 
     const { error: orderErr } = await sb.from(table).update(updatePayload).eq('id', o.id);
     if(orderErr) throw orderErr;
+
 
     // items: update existing (editable fields only — never touch snapshot columns),
     // insert new ones, delete removed ones. This preserves any frozen landed-cost
