@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sarva Foam — Order Management</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<style>
+  :root{
+    --bg:#E9EDEE; --panel:#FFFFFF; --ink:#16211F; --ink-soft:#4B5A57;
+    --line:#C7D0D1; --accent:#E8601C; --accent-ink:#7A2E10;
+    --positive:#146B5C; --positive-bg:#E4F1EE;
+    --negative:#B23A2E; --negative-bg:#FBEAE7;
+    --field-bg:#F4F6F6;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:'IBM Plex Sans',sans-serif;font-size:14px;line-height:1.5;}
+  .mono{font-family:'IBM Plex Mono',monospace;}
+  header{background:var(--ink);color:#fff;padding:18px 28px;display:flex;align-items:center;justify-content:space-between;gap:14px;}
+  header .left{display:flex;align-items:baseline;gap:14px;}
+  header .wordmark{font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:15px;letter-spacing:.02em;}
+  header .sub{color:#9FB0AC;font-size:12.5px;}
+  header .right{display:flex;align-items:center;gap:14px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#9FB0AC;}
+  nav{display:flex;gap:2px;background:var(--panel);border-bottom:1px solid var(--line);padding:0 24px;}
+  nav button{border:none;background:none;padding:14px 18px;font-size:13.5px;font-weight:600;color:var(--ink-soft);cursor:pointer;border-bottom:2px solid transparent;font-family:'IBM Plex Sans',sans-serif;}
+  nav button.active{color:var(--accent-ink);border-bottom-color:var(--accent);}
+  main{max-width:1180px;margin:0 auto;padding:26px 24px 60px;}
+  .grid{display:grid;grid-template-columns:1.55fr 1fr;gap:20px;align-items:start;}
+  @media (max-width:920px){.grid{grid-template-columns:1fr;}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:20px 22px;margin-bottom:18px;}
+  .card h2{font-size:13px;margin:0 0 14px;font-weight:600;color:var(--ink);border-bottom:1px solid var(--line);padding-bottom:10px;}
+  .field-row{display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;}
+  .field{flex:1;min-width:160px;display:flex;flex-direction:column;gap:5px;}
+  .field label{font-size:11.5px;color:var(--ink-soft);font-weight:600;}
+  select,input{background:var(--field-bg);border:1px solid var(--line);border-radius:2px;padding:8px 9px;font-size:13.5px;color:var(--ink);font-family:'IBM Plex Sans',sans-serif;}
+  select:focus,input:focus{outline:2px solid var(--accent);outline-offset:0;}
+  .order-type-tabs,.subtabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;}
+  .order-type-tabs button{font-family:'IBM Plex Mono',monospace;font-size:12px;padding:8px 12px;border-radius:2px;border:1px solid var(--line);background:var(--field-bg);color:var(--ink-soft);cursor:pointer;}
+  .order-type-tabs button.active{background:var(--accent);border-color:var(--accent);color:#fff;}
+  .subtabs button{font-size:12.5px;padding:7px 12px;border-radius:2px;border:1px solid var(--line);background:var(--panel);color:var(--ink-soft);cursor:pointer;}
+  .subtabs button.active{background:var(--ink);color:#fff;border-color:var(--ink);}
+  table{width:100%;border-collapse:collapse;font-size:13px;}
+  th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--ink-soft);font-weight:600;padding:7px 8px;border-bottom:1px solid var(--line);}
+  td{padding:7px 8px;border-bottom:1px solid #EEF1F1;}
+  tr:last-child td{border-bottom:none;}
+  .num{text-align:right;font-family:'IBM Plex Mono',monospace;}
+  .btn{font-family:'IBM Plex Sans',sans-serif;font-weight:600;font-size:13px;padding:9px 16px;border-radius:2px;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer;}
+  .btn.secondary{background:transparent;color:var(--ink);border-color:var(--line);}
+  .btn.small{padding:5px 10px;font-size:12px;}
+  .add-line{background:none;border:1px dashed var(--line);color:var(--ink-soft);padding:7px 10px;border-radius:2px;cursor:pointer;font-size:12.5px;}
+  .summary-line{display:flex;justify-content:space-between;padding:6px 0;font-size:13.5px;}
+  .summary-line.total{border-top:1px solid var(--line);margin-top:6px;padding-top:10px;font-weight:600;font-size:15px;}
+  .pos{color:var(--positive);} .neg{color:var(--negative);}
+  .badge{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:11px;padding:2px 7px;border-radius:2px;background:var(--field-bg);color:var(--ink-soft);border:1px solid var(--line);}
+  .badge.delivered{background:var(--positive-bg);color:var(--positive);border-color:transparent;}
+  .kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px;}
+  @media (max-width:820px){.kpi-row{grid-template-columns:repeat(2,1fr);}}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:16px 18px;}
+  .kpi .label{font-size:11px;color:var(--ink-soft);text-transform:uppercase;margin-bottom:6px;}
+  .kpi .value{font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:600;}
+  .helptext{font-size:12px;color:var(--ink-soft);margin-top:2px;}
+  .warn-box{background:var(--negative-bg);border:1px solid #EAC3BD;color:var(--accent-ink);padding:10px 12px;border-radius:2px;font-size:12.5px;margin-bottom:12px;}
+  .empty{color:var(--ink-soft);font-size:13px;padding:14px 0;}
+  .order-row{cursor:pointer;}
+  #login-screen{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:200;}
+  .login-card{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:32px 36px;width:340px;}
+  .login-card h1{font-size:15px;margin:0 0 4px;}
+  .login-card .sub{font-size:12px;color:var(--ink-soft);margin-bottom:20px;}
+  .login-card .field{margin-bottom:14px;}
+  .login-card .btn{width:100%;margin-top:6px;}
+  .login-err{color:var(--negative);font-size:12.5px;margin-top:10px;min-height:16px;}
+  #app-shell{display:none;}
+  .loading{padding:30px;text-align:center;color:var(--ink-soft);font-family:'IBM Plex Mono',monospace;font-size:13px;}
+</style>
+</head>
+<body>
+
+<div id="login-screen">
+  <div class="login-card">
+    <h1>SARVA FOAM — Order Management</h1>
+    <div class="sub">Sign in with your staff account</div>
+    <div class="field"><label>Email</label><input type="email" id="login-email"></div>
+    <div class="field"><label>Password</label><input type="password" id="login-password"></div>
+    <button class="btn" id="login-btn">Sign in</button>
+    <div class="login-err" id="login-err"></div>
+  </div>
+</div>
+
+<div id="app-shell">
+  <header>
+    <div class="left">
+      <div class="wordmark">SARVA FOAM</div>
+      <div class="sub">Order Management — connected</div>
+    </div>
+    <div class="right">
+      <span id="user-email"></span>
+      <button class="btn small secondary" id="logout-btn" style="background:transparent;color:#fff;border-color:#444">Sign out</button>
+    </div>
+  </header>
+  <nav>
+    <button class="active" data-view="order">Place Order</button>
+    <button data-view="orderlist">Order Book</button>
+    <button data-view="dashboard">Ledger &amp; Profit</button>
+  </nav>
+  <main>
+    <div id="view-order"></div>
+    <div id="view-orderlist" style="display:none"></div>
+    <div id="view-orderdetail" style="display:none"></div>
+    <div id="view-dashboard" style="display:none"></div>
+  </main>
+</div>
+
+<script>
+/* =====================================================================
+   CONFIG — fill these in with your real Order Management project's
+   values (Project Settings → API). The anon key is safe to expose
+   client-side — RLS (enable_auth_rls.sql) is what actually restricts
+   access, not the key itself.
+   ===================================================================== */
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const ALL_STATUSES = ['Pending','In Production','In Transit','Delivered','Delivered and paid','Cancelled'];
+const DELIVERED_OR_LATER = ['Delivered','Delivered and paid'];
+
+function fmt(n){ if(n===null||n===undefined||isNaN(n)) return '—'; return '£'+Number(n).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function todayStr(){ return new Date().toISOString().slice(0,10); }
+
+/* =====================================================================
+   AUTH
+   ===================================================================== */
+async function checkAuth(){
+  const { data: { session } } = await sb.auth.getSession();
+  if(session){ showApp(session); } else { showLogin(); }
+}
+function showLogin(){
+  document.getElementById('login-screen').style.display = 'flex';
+  document.getElementById('app-shell').style.display = 'none';
+}
+async function showApp(session){
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app-shell').style.display = 'block';
+  document.getElementById('user-email').textContent = session.user.email;
+  await loadReferenceData();
+  renderOrderView();
+}
+document.getElementById('login-btn').addEventListener('click', async ()=>{
+  const email = document.getElementById('login-email').value;
+  const password = document.getElementById('login-password').value;
+  const errEl = document.getElementById('login-err');
+  errEl.textContent = 'Signing in…';
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if(error){ errEl.textContent = error.message; return; }
+  errEl.textContent = '';
+  showApp(data.session);
+});
+document.getElementById('logout-btn').addEventListener('click', async ()=>{
+  await sb.auth.signOut();
+  showLogin();
+});
+sb.auth.onAuthStateChange((event, session)=>{
+  if(event === 'SIGNED_OUT') showLogin();
+});
+
+/* =====================================================================
+   REFERENCE DATA — fetched once after login, used for dropdowns/lookups only.
+   Nothing here duplicates business logic — pricing/costing/invoicing all
+   happen in Postgres (triggers), never in this file.
+   ===================================================================== */
+let PRODUCTS=[], CUSTOMERS=[], AGENTS=[], WAREHOUSES=[], PRODUCTION_UNITS=[];
+
+async function loadReferenceData(){
+  const [p, c, a, w, u] = await Promise.all([
+    sb.from('products').select('id,sku_name').eq('is_active', true).order('sku_name'),
+    sb.from('customers').select('id,name,is_warehouse_destination,linked_warehouse_id').order('name'),
+    sb.from('agents').select('id,name').order('name'),
+    sb.from('warehouses').select('id,name').eq('is_active', true).order('name'),
+    sb.from('production_units').select('id,name').eq('is_active', true).order('name'),
+  ]);
+  PRODUCTS = p.data || []; CUSTOMERS = c.data || []; AGENTS = a.data || [];
+  WAREHOUSES = w.data || []; PRODUCTION_UNITS = u.data || [];
+}
+function productName(id){ return PRODUCTS.find(x=>x.id===id)?.sku_name || id; }
+function customerName(id){ return CUSTOMERS.find(x=>x.id===id)?.name || id; }
+function agentName(id){ return AGENTS.find(x=>x.id===id)?.name || '—'; }
+function warehouseName(id){ return WAREHOUSES.find(x=>x.id===id)?.name || id; }
+function unitName(id){ return PRODUCTION_UNITS.find(x=>x.id===id)?.name || '—'; }
+function optionsHtml(list, labelFn, selected){
+  return list.map(x=>`<option value="${x.id}" ${x.id===selected?'selected':''}>${labelFn(x)}</option>`).join('');
+}
+
+/* =====================================================================
+   NAV
+   ===================================================================== */
+document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click', async ()=>{
+  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  document.getElementById('view-orderdetail').style.display='none';
+  ['order','orderlist','dashboard'].forEach(v=>document.getElementById('view-'+v).style.display = (v===b.dataset.view?'block':'none'));
+  if(b.dataset.view==='orderlist') await renderOrderList();
+  if(b.dataset.view==='dashboard') await renderDashboard();
+}));
+
+/* =====================================================================
+   PLACE ORDER
+   ===================================================================== */
+let currentOrderType = 'direct';
+let draftItems = [];
+
+function renderOrderView(){
+  const el = document.getElementById('view-order');
+  const today = todayStr();
+  el.innerHTML = `
+    <div class="card">
+      <h2>Order type</h2>
+      <div class="order-type-tabs">
+        <button data-t="direct" class="${currentOrderType==='direct'?'active':''}">Direct container → customer</button>
+        <button data-t="warehouse_bound" class="${currentOrderType==='warehouse_bound'?'active':''}">Container → warehouse</button>
+        <button data-t="local" class="${currentOrderType==='local'?'active':''}">Local delivery from warehouse</button>
+        <button data-t="transfer" class="${currentOrderType==='transfer'?'active':''}">Warehouse → warehouse transfer</button>
+      </div>
+    </div>
+    <div class="grid">
+      <div><div class="card" id="order-form-card"></div></div>
+      <div><div class="card" id="order-summary-card"><h2>Order summary</h2><div class="empty">Add at least one line item to see it here.</div></div></div>
+    </div>
+  `;
+  el.querySelectorAll('.order-type-tabs button').forEach(b=>b.addEventListener('click', ()=>{
+    currentOrderType = b.dataset.t; draftItems=[]; renderOrderView();
+  }));
+  renderOrderForm(today);
+}
+
+function renderOrderForm(today){
+  const formCard = document.getElementById('order-form-card');
+  const isTransfer = currentOrderType==='transfer';
+  const isLocal = currentOrderType==='local';
+  const isWarehouseBound = currentOrderType==='warehouse_bound';
+  const customerOptions = isWarehouseBound ? CUSTOMERS.filter(c=>c.is_warehouse_destination) : CUSTOMERS.filter(c=>!c.is_warehouse_destination);
+
+  formCard.innerHTML = `
+    <h2>${ {direct:'Direct container', warehouse_bound:'Container to warehouse', local:'Local delivery order', transfer:'Inter-warehouse transfer'}[currentOrderType] }</h2>
+    <div class="field-row">
+      ${!isTransfer ? `<div class="field"><label>${isLocal? 'Warehouse (dispatching)':'Customer'}</label>
+        <select id="f-primary">${isLocal ? optionsHtml(WAREHOUSES,w=>w.name) : optionsHtml(customerOptions,c=>c.name)}</select></div>`
+      : `<div class="field"><label>From warehouse</label><select id="f-from">${optionsHtml(WAREHOUSES,w=>w.name)}</select></div>
+         <div class="field"><label>To warehouse</label><select id="f-to">${optionsHtml(WAREHOUSES,w=>w.name)}</select></div>`}
+      ${isLocal ? `<div class="field"><label>Customer</label><select id="f-customer">${optionsHtml(customerOptions,c=>c.name)}</select></div>`:''}
+      <div class="field"><label>Order date</label><input type="date" id="f-order-date" value="${today}"></div>
+    </div>
+    ${!isTransfer ? `<div class="field-row">
+      <div class="field"><label>Customer order ID</label><input type="text" id="f-cust-order-id" placeholder="e.g. PO-4471"></div>
+      <div class="field"><label>Delivery address</label><input type="text" id="f-delivery-address"></div>
+      <div class="field"><label>Customer requested date</label><input type="date" id="f-requested-date" value="${today}"></div>
+      <div class="field"><label>Expected delivery date</label><input type="date" id="f-expected-date" value="${today}"></div>
+    </div>` : ''}
+    ${!isTransfer && !isLocal ? `<div class="field-row">
+      <div class="field"><label>Source plant</label><select id="f-source-unit">${optionsHtml(PRODUCTION_UNITS,u=>u.name)}</select></div>
+      <div class="field"><label>Expected stuffing date</label><input type="date" id="f-stuffing-date"></div>
+      <div class="field"><label>Vessel date</label><input type="date" id="f-vessel-date"></div>
+    </div>` : ''}
+    ${!isTransfer ? `<div class="field-row">
+      <div class="field"><label>Agent</label><select id="f-agent"><option value="">— none —</option>${optionsHtml(AGENTS,a=>a.name)}</select></div>
+      ${!isLocal ? `<div class="field"><label>Logistics cost (£, whole container)</label><input type="number" id="f-logistics" value="0" min="0" step="1"></div>` :
+        `<div class="field"><label>Vehicle no.</label><input type="text" id="f-vehicle-no"></div>
+         <div class="field" style="flex-direction:row;align-items:center;gap:8px;margin-top:16px"><input type="checkbox" id="f-urgency" style="width:auto"><label style="margin:0">Urgent</label></div>`}
+      <div class="field"><label>Discount (£)</label><input type="number" id="f-discount" value="0" min="0" step="1"></div>
+    </div>` : `<div class="field-row"><div class="field"><label>Transfer date</label><input type="date" id="f-transfer-date" value="${today}"></div>
+      <div class="field"><label>Reference no.</label><input type="text" id="f-ref" placeholder="TRF-0000"></div></div>`}
+    ${!isTransfer ? `<div class="field-row">
+      <div class="field"><label>Remarks</label><input type="text" id="f-remarks"></div>
+    </div>` : ''}
+
+    <h2 style="margin-top:18px">Line items</h2>
+    <table><thead><tr><th>Product</th><th style="width:90px">Qty (rolls)</th>
+      ${!isTransfer && !isWarehouseBound? '<th style="width:130px">Special price /roll</th>':''}<th style="width:40px"></th></tr></thead>
+      <tbody id="line-items-body"></tbody></table>
+    <button class="add-line" id="add-line-btn" style="margin-top:8px">+ Add line item</button>
+
+    <div style="margin-top:20px;display:flex;gap:10px">
+      <button class="btn" id="submit-order-btn">Place order</button>
+      <span class="helptext" id="submit-msg"></span>
+    </div>
+  `;
+
+  if(draftItems.length===0) draftItems.push({product_id:PRODUCTS[0]?.id, quantity:'', special_price:''});
+  renderLineItems();
+  document.getElementById('add-line-btn').addEventListener('click', ()=>{
+    draftItems.push({product_id:PRODUCTS[0]?.id, quantity:'', special_price:''});
+    renderLineItems(); updateOrderSummary();
+  });
+  formCard.querySelectorAll('input,select').forEach(inp=>inp.addEventListener('input', updateOrderSummary));
+  document.getElementById('submit-order-btn').addEventListener('click', submitOrder);
+  updateOrderSummary();
+}
+
+function renderLineItems(){
+  const body = document.getElementById('line-items-body');
+  const isTransfer = currentOrderType==='transfer';
+  const isWarehouseBound = currentOrderType==='warehouse_bound';
+  body.innerHTML = draftItems.map((it,idx)=>`
+    <tr>
+      <td><select data-idx="${idx}" data-f="product_id">${optionsHtml(PRODUCTS,p=>p.sku_name,it.product_id)}</select></td>
+      <td><input type="number" min="1" data-idx="${idx}" data-f="quantity" value="${it.quantity}" style="width:80px"></td>
+      ${!isTransfer && !isWarehouseBound ? `<td><input type="number" min="0" step="0.01" data-idx="${idx}" data-f="special_price" value="${it.special_price}" placeholder="optional" style="width:110px"></td>` : ''}
+      <td>${draftItems.length>1?`<button class="btn small secondary" data-remove="${idx}">×</button>`:''}</td>
+    </tr>`).join('');
+  body.querySelectorAll('[data-f]').forEach(inp=>inp.addEventListener('input', e=>{
+    draftItems[+e.target.dataset.idx][e.target.dataset.f] = e.target.value;
+    updateOrderSummary();
+  }));
+  body.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click', e=>{
+    draftItems.splice(+e.target.dataset.remove,1); renderLineItems(); updateOrderSummary();
+  }));
+}
+
+function updateOrderSummary(){
+  const card = document.getElementById('order-summary-card');
+  const items = draftItems.filter(it=>it.quantity && +it.quantity>0);
+  if(!items.length){ card.innerHTML = `<h2>Order summary</h2><div class="empty">Add at least one line item with a quantity.</div>`; return; }
+  const totalRolls = items.reduce((s,i)=>s+ +i.quantity,0);
+  card.innerHTML = `<h2>Order summary</h2>
+    <table><thead><tr><th>Product</th><th class="num">Qty ordered</th></tr></thead>
+    <tbody>${items.map(r=>`<tr><td>${productName(r.product_id)}</td><td class="num">${r.quantity}</td></tr>`).join('')}</tbody></table>
+    <div class="summary-line total"><span>Total rolls ordered</span><span>${totalRolls}</span></div>
+    <p class="helptext" style="margin-top:14px">No invoice value or profit shown here — those depend on dispatched quantity, computed by the database once this order is opened from the Order Book and marked Delivered.</p>`;
+}
+
+async function submitOrder(){
+  const msg = document.getElementById('submit-msg');
+  const isTransfer = currentOrderType==='transfer';
+  const isLocal = currentOrderType==='local';
+  const items = draftItems.filter(it=>it.quantity && +it.quantity>0);
+  if(!items.length){ msg.textContent='Add at least one line item.'; return; }
+  msg.textContent = 'Saving…';
+
+  try{
+    if(isTransfer){
+      const from = document.getElementById('f-from').value, to = document.getElementById('f-to').value;
+      if(from===to){ msg.textContent='Source and destination warehouse must differ.'; return; }
+      const { data: transfer, error: e1 } = await sb.from('warehouse_transfers').insert({
+        from_warehouse_id: from, to_warehouse_id: to,
+        transfer_date: document.getElementById('f-transfer-date').value,
+        reference_no: document.getElementById('f-ref').value || null,
+      }).select().single();
+      if(e1) throw e1;
+      const { error: e2 } = await sb.from('warehouse_transfer_items').insert(
+        items.map(i=>({ transfer_id: transfer.id, product_id: i.product_id, quantity: +i.quantity }))
+      );
+      if(e2) throw e2;
+      msg.textContent = `Transfer ${transfer.reference_no||transfer.id} recorded — ledger updated by the database.`;
+      draftItems=[]; renderOrderForm(todayStr());
+      return;
+    }
+
+    const primaryEl = document.getElementById('f-primary');
+    const customerId = isLocal ? document.getElementById('f-customer').value : primaryEl.value;
+    const warehouseId = isLocal ? primaryEl.value : null;
+    const destinationWarehouseId = isLocal ? null : (currentOrderType==='warehouse_bound' ? CUSTOMERS.find(c=>c.id===primaryEl.value)?.linked_warehouse_id : null);
+
+    const common = {
+      customer_id: customerId,
+      customer_order_id: document.getElementById('f-cust-order-id').value || null,
+      delivery_address: document.getElementById('f-delivery-address').value || null,
+      order_date: document.getElementById('f-order-date').value,
+      customer_requested_date: document.getElementById('f-requested-date').value || null,
+      expected_delivery_date: document.getElementById('f-expected-date').value || null,
+      agent_id: document.getElementById('f-agent').value || null,
+      total_discount_gbp: +(document.getElementById('f-discount').value||0),
+      remarks: document.getElementById('f-remarks').value || null,
+      status: 'Pending',
+    };
+
+    let orderId, table, itemsTable, itemFk;
+    if(isLocal){
+      const { data: order, error } = await sb.from('warehouse_orders').insert({
+        ...common,
+        warehouse_id: warehouseId,
+        vehicle_no: document.getElementById('f-vehicle-no').value || null,
+        urgency_flag: document.getElementById('f-urgency').checked,
+      }).select().single();
+      if(error) throw error;
+      orderId = order.id; table='warehouse_orders'; itemsTable='warehouse_order_items'; itemFk='warehouse_order_id';
+    } else {
+      const { data: order, error } = await sb.from('containers').insert({
+        ...common,
+        destination_warehouse_id: destinationWarehouseId,
+        source_unit_id: document.getElementById('f-source-unit')?.value || null,
+        expected_stuffing_date: document.getElementById('f-stuffing-date')?.value || null,
+        vessel_date: document.getElementById('f-vessel-date')?.value || null,
+        logistics_cost_gbp: +(document.getElementById('f-logistics')?.value||0),
+      }).select().single();
+      if(error) throw error;
+      orderId = order.id; table='containers'; itemsTable='container_items'; itemFk='container_id';
+    }
+
+    const itemRows = items.map(i=>({
+      [itemFk]: orderId, product_id: i.product_id, quantity: +i.quantity,
+      special_price_per_roll_gbp: i.special_price ? +i.special_price : null,
+    }));
+    const { error: itemsErr } = await sb.from(itemsTable).insert(itemRows);
+    if(itemsErr) throw itemsErr;
+
+    msg.textContent = `Order placed as Pending — open it from the Order Book to advance it.`;
+    draftItems=[]; renderOrderForm(todayStr());
+  }catch(err){
+    msg.textContent = 'Error: ' + (err.message || err);
+  }
+}
+
+/* =====================================================================
+   ORDER BOOK
+   ===================================================================== */
+const ORDER_TYPE_TABS = [
+  {key:'direct', label:'Direct container'},
+  {key:'warehouse_bound', label:'Container → warehouse'},
+  {key:'local', label:'Local delivery'},
+  {key:'transfer', label:'Transfer'},
+];
+let obTypeTab='direct', obStatusTab='All';
+let cachedOrderRows = [];
+
+async function fetchOrderBookRows(){
+  const [containersRes, whOrdersRes, transfersRes] = await Promise.all([
+    sb.from('containers').select('id,container_no,order_date,status,invoice_value_gbp,destination_warehouse_id,customer_id'),
+    sb.from('warehouse_orders').select('id,order_date,status,invoice_value_gbp,warehouse_id,customer_id'),
+    sb.from('warehouse_transfers').select('id,reference_no,transfer_date,from_warehouse_id,to_warehouse_id'),
+  ]);
+  const rows = [];
+  (containersRes.data||[]).forEach(c=>rows.push({
+    typeKey: c.destination_warehouse_id?'warehouse_bound':'direct',
+    type: c.destination_warehouse_id?'Container → warehouse':'Direct container',
+    id: c.container_no, refId: c.id, isLocal:false,
+    who: c.destination_warehouse_id?warehouseName(c.destination_warehouse_id):customerName(c.customer_id),
+    date: c.order_date, status: c.status, value: c.invoice_value_gbp,
+  }));
+  (whOrdersRes.data||[]).forEach(o=>rows.push({
+    typeKey:'local', type:'Local delivery', id:o.id, refId:o.id, isLocal:true,
+    who: customerName(o.customer_id)+' ← '+warehouseName(o.warehouse_id),
+    date:o.order_date, status:o.status, value:o.invoice_value_gbp,
+  }));
+  (transfersRes.data||[]).forEach(t=>rows.push({
+    typeKey:'transfer', type:'Transfer', id:t.reference_no||t.id, refId:t.id, isLocal:null,
+    who: warehouseName(t.from_warehouse_id)+' → '+warehouseName(t.to_warehouse_id),
+    date:t.transfer_date, status:'Processed', value:null,
+  }));
+  return rows.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+}
+
+async function renderOrderList(){
+  const el = document.getElementById('view-orderlist');
+  el.innerHTML = `<div class="card"><div class="loading">Loading order book…</div></div>`;
+  cachedOrderRows = await fetchOrderBookRows();
+  drawOrderList();
+}
+function drawOrderList(){
+  const el = document.getElementById('view-orderlist');
+  const allRows = cachedOrderRows;
+  const typeRows = allRows.filter(r=>r.typeKey===obTypeTab);
+  const hasStatusTabs = obTypeTab !== 'transfer';
+  const statusTabs = hasStatusTabs ? ['All', ...ALL_STATUSES] : null;
+  const visibleRows = hasStatusTabs && obStatusTab!=='All' ? typeRows.filter(r=>r.status===obStatusTab) : typeRows;
+
+  el.innerHTML = `<div class="card">
+    <h2>Order book (${allRows.length})</h2>
+    <p class="helptext" style="margin-bottom:14px">Click any order to open it and edit real data — every change here writes to Supabase.</p>
+    <div class="order-type-tabs">${ORDER_TYPE_TABS.map(t=>{
+      const n = allRows.filter(r=>r.typeKey===t.key).length;
+      return `<button data-t="${t.key}" class="${obTypeTab===t.key?'active':''}">${t.label} (${n})</button>`;
+    }).join('')}</div>
+    ${hasStatusTabs ? `<div class="subtabs" style="margin-bottom:16px">${statusTabs.map(s=>{
+      const n = s==='All'?typeRows.length:typeRows.filter(r=>r.status===s).length;
+      return `<button data-s="${s}" class="${obStatusTab===s?'active':''}">${s} (${n})</button>`;
+    }).join('')}</div>` : ''}
+    ${visibleRows.length? `<table><thead><tr><th>Reference</th><th>Route</th><th>Order date</th><th>Status</th><th class="num">Value</th></tr></thead>
+    <tbody>${visibleRows.map((r,i)=>`<tr class="order-row" data-idx="${i}"><td class="mono"><span style="color:var(--accent-ink);text-decoration:underline">${r.id}</span></td>
+      <td>${r.who}</td><td class="mono">${r.date||''}</td>
+      <td><span class="badge ${DELIVERED_OR_LATER.includes(r.status)||r.status==='Processed'?'delivered':''}">${r.status}</span></td>
+      <td class="num">${r.value===null?'—':fmt(r.value)}</td></tr>`).join('')}</tbody></table>`
+    : `<div class="empty">No orders in this status.</div>`}
+  </div>`;
+
+  el.querySelectorAll('.order-type-tabs button').forEach(b=>b.addEventListener('click', ()=>{ obTypeTab=b.dataset.t; obStatusTab='All'; drawOrderList(); }));
+  el.querySelectorAll('.subtabs button').forEach(b=>b.addEventListener('click', ()=>{ obStatusTab=b.dataset.s; drawOrderList(); }));
+  el.querySelectorAll('.order-row').forEach(tr=>tr.addEventListener('click', ()=>{
+    const r = visibleRows[+tr.dataset.idx];
+    if(r.typeKey==='transfer') return; // transfers process instantly, nothing to open
+    openOrderDetail(r.typeKey, r.isLocal, r.refId);
+  }));
+}
+
+/* =====================================================================
+   ORDER DETAIL — real fetch + real update, no client-side math
+   ===================================================================== */
+let detailTarget = null;
+
+async function openOrderDetail(typeKey, isLocal, id){
+  ['order','orderlist','dashboard'].forEach(v=>document.getElementById('view-'+v).style.display='none');
+  const el = document.getElementById('view-orderdetail');
+  el.style.display='block';
+  el.innerHTML = `<div class="card"><div class="loading">Loading order…</div></div>`;
+  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
+
+  const table = isLocal ? 'warehouse_orders' : 'containers';
+  const itemsTable = isLocal ? 'warehouse_order_items' : 'container_items';
+  const itemFk = isLocal ? 'warehouse_order_id' : 'container_id';
+
+  const [{data: order, error: e1}, {data: items, error: e2}] = await Promise.all([
+    sb.from(table).select('*').eq('id', id).single(),
+    sb.from(itemsTable).select('*').eq(itemFk, id),
+  ]);
+  if(e1 || e2){ el.innerHTML = `<div class="card"><div class="warn-box">Error loading order: ${(e1||e2).message}</div></div>`; return; }
+
+  detailTarget = { typeKey, isLocal, table, itemsTable, itemFk, order, items: items||[] };
+  renderOrderDetail();
+}
+
+function closeOrderDetail(){
+  detailTarget = null;
+  document.getElementById('view-orderdetail').style.display='none';
+  document.getElementById('view-orderlist').style.display='block';
+  document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('active', x.dataset.view==='orderlist'));
+  drawOrderList();
+}
+
+function renderOrderDetail(){
+  const el = document.getElementById('view-orderdetail');
+  const { isLocal, order: o, items } = detailTarget;
+  const referenceLabel = isLocal ? o.id : o.container_no;
+  const wasProcessed = isLocal ? items.some(it=>it.snapshot_written_at) : DELIVERED_OR_LATER.includes(o.status);
+
+  el.innerHTML = `
+    <div class="card" style="display:flex;align-items:center;justify-content:space-between">
+      <div><span class="helptext">Order Book</span> <span class="helptext">›</span> <strong>${referenceLabel}</strong></div>
+      <div style="display:flex;gap:10px">
+        <button class="btn secondary" id="detail-back">← Back</button>
+        <button class="btn" id="detail-save">Save changes</button>
+      </div>
+    </div>
+    <div class="grid">
+      <div><div class="card">
+        <h2>Order details</h2>
+        <div class="field-row">
+          <div class="field"><label>Customer</label><div class="mono" style="padding:8px 0">${customerName(o.customer_id)}</div></div>
+          <div class="field"><label>Order ID</label><div class="mono" style="padding:8px 0">${referenceLabel}</div></div>
+          <div class="field"><label>Order date</label><input type="date" id="d-order-date" value="${o.order_date||''}"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Customer order ID</label><input type="text" id="d-cust-order-id" value="${o.customer_order_id||''}"></div>
+          <div class="field"><label>Delivery address</label><input type="text" id="d-delivery-address" value="${o.delivery_address||''}"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Customer requested date</label><input type="date" id="d-requested-date" value="${o.customer_requested_date||''}"></div>
+          <div class="field"><label>Expected delivery date</label><input type="date" id="d-expected-date" value="${o.expected_delivery_date||''}"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Agent</label><select id="d-agent"><option value="">— none —</option>${optionsHtml(AGENTS,a=>a.name,o.agent_id)}</select></div>
+          <div class="field"><label>Order status</label><select id="d-status">${ALL_STATUSES.map(s=>`<option value="${s}" ${s===o.status?'selected':''}>${s}</option>`).join('')}</select></div>
+          <div class="field"><label>Discount (£)</label><input type="number" id="d-discount" value="${o.total_discount_gbp||0}" min="0" step="1"></div>
+        </div>
+        ${!isLocal ? `<div class="field-row">
+          <div class="field"><label>Dispatch warehouse ${o.destination_warehouse_id?'':'(direct — none)'}</label><div class="mono" style="padding:8px 0">${o.destination_warehouse_id?warehouseName(o.destination_warehouse_id):'—'}</div></div>
+          <div class="field"><label>Logistics cost (£)</label><input type="number" id="d-logistics" value="${o.logistics_cost_gbp||0}" min="0" step="1"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Source plant</label><select id="d-source-unit"><option value="">— not recorded —</option>${optionsHtml(PRODUCTION_UNITS,u=>u.name,o.source_unit_id)}</select></div>
+          <div class="field"><label>Expected stuffing date</label><input type="date" id="d-stuffing-date" value="${o.expected_stuffing_date||''}"></div>
+          <div class="field"><label>Vessel date</label><input type="date" id="d-vessel-date" value="${o.vessel_date||''}"></div>
+        </div>
+        ${!o.source_unit_id ? `<div class="warn-box">No source plant recorded — ex-factory price lookup falls back to any unit's most recent price.</div>` : ''}` : `<div class="field-row">
+          <div class="field"><label>Dispatch warehouse</label><div class="mono" style="padding:8px 0">${warehouseName(o.warehouse_id)}</div></div>
+          <div class="field"><label>Vehicle no.</label><input type="text" id="d-vehicle-no" value="${o.vehicle_no||''}"></div>
+          <div class="field" style="flex-direction:row;align-items:center;gap:8px;margin-top:16px"><input type="checkbox" id="d-urgency" ${o.urgency_flag?'checked':''} style="width:auto"><label style="margin:0">Urgent</label></div>
+        </div>`}
+        <div class="field-row"><div class="field"><label>Remarks</label><input type="text" id="d-remarks" value="${o.remarks||''}"></div></div>
+
+        ${wasProcessed ? `<p class="helptext">This order's cost/ledger figures are already computed and frozen. Editing quantities here won't recompute them.</p>`
+          : `<p class="helptext">Dispatched quantity can differ from ordered. Saving with status Delivered / Delivered and paid uses whatever is entered here.</p>`}
+        <h2 style="margin-top:18px">Related Order Items</h2>
+        <table><thead><tr><th>Product</th><th class="num">Quantity</th><th class="num">Dispatched</th><th class="num">Special price</th><th></th></tr></thead>
+          <tbody id="detail-items-body"></tbody></table>
+        <button class="add-line" id="detail-add-line" style="margin-top:8px">+ Add line item</button>
+      </div></div>
+      <div><div class="card" id="detail-summary"></div></div>
+    </div>
+  `;
+
+  renderDetailItems();
+  renderDetailSummary();
+
+  document.getElementById('detail-back').addEventListener('click', closeOrderDetail);
+  document.getElementById('detail-save').addEventListener('click', saveOrderDetail);
+  document.getElementById('detail-add-line').addEventListener('click', ()=>{
+    detailTarget.items.push({product_id:PRODUCTS[0]?.id, quantity:0, dispatched_quantity:0, special_price_per_roll_gbp:null, _new:true});
+    renderDetailItems();
+  });
+}
+
+function renderDetailItems(){
+  const body = document.getElementById('detail-items-body');
+  const items = detailTarget.items;
+  body.innerHTML = items.map((it,idx)=>`
+    <tr>
+      <td><select data-idx="${idx}" data-f="product_id">${optionsHtml(PRODUCTS,p=>p.sku_name,it.product_id)}</select></td>
+      <td><input type="number" min="0" data-idx="${idx}" data-f="quantity" value="${it.quantity}" style="width:80px;text-align:right"></td>
+      <td><input type="number" min="0" data-idx="${idx}" data-f="dispatched_quantity" value="${it.dispatched_quantity||0}" style="width:80px;text-align:right"></td>
+      <td><input type="number" min="0" step="0.01" data-idx="${idx}" data-f="special_price_per_roll_gbp" value="${it.special_price_per_roll_gbp||''}" style="width:90px;text-align:right" placeholder="optional"></td>
+      <td>${items.length>1?`<button class="btn small secondary" data-remove="${idx}">×</button>`:''}</td>
+    </tr>`).join('');
+  body.querySelectorAll('[data-f]').forEach(inp=>inp.addEventListener('input', e=>{
+    const idx=+e.target.dataset.idx, f=e.target.dataset.f;
+    detailTarget.items[idx][f] = f==='product_id' ? e.target.value : (e.target.value===''?null:+e.target.value);
+  }));
+  body.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click', e=>{
+    const idx = +e.target.dataset.remove;
+    const removed = detailTarget.items.splice(idx,1)[0];
+    if(removed.id) detailTarget._deletedItemIds = [...(detailTarget._deletedItemIds||[]), removed.id];
+    renderDetailItems();
+  }));
+}
+
+function renderDetailSummary(){
+  const box = document.getElementById('detail-summary');
+  const { isLocal, order: o, items } = detailTarget;
+  box.innerHTML = `<h2>Figures on file (from the database)</h2>
+    <div class="summary-line"><span>Invoice value</span><span class="v mono">${fmt(o.invoice_value_gbp)}</span></div>
+    <div class="summary-line"><span>Commission</span><span class="v mono">${fmt(o.commission_value_gbp)}</span></div>
+    ${isLocal ? `<h2 style="margin-top:18px">Line item cost (if delivered)</h2>
+      <table><thead><tr><th>Product</th><th class="num">Landed</th><th class="num">Overhead</th><th class="num">Delivery</th></tr></thead>
+      <tbody>${items.map(it=>`<tr><td>${productName(it.product_id)}</td><td class="num">${fmt(it.landed_cost_total_gbp)}</td><td class="num">${fmt(it.overhead_snapshot_gbp)}</td><td class="num">${fmt(it.delivery_cost_snapshot_gbp)}</td></tr>`).join('')}</tbody></table>` : ''}
+    <p class="helptext" style="margin-top:14px">These are the actual values already computed by the database — not a live estimate. They update after you click Save, since Postgres triggers recalculate on every change.</p>`;
+}
+
+async function saveOrderDetail(){
+  const { table, itemsTable, itemFk, order: o, items, isLocal } = detailTarget;
+  const saveBtn = document.getElementById('detail-save');
+  saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+
+  try{
+    const updatePayload = {
+      agent_id: document.getElementById('d-agent').value || null,
+      customer_order_id: document.getElementById('d-cust-order-id').value || null,
+      delivery_address: document.getElementById('d-delivery-address').value || null,
+      customer_requested_date: document.getElementById('d-requested-date').value || null,
+      expected_delivery_date: document.getElementById('d-expected-date').value || null,
+      order_date: document.getElementById('d-order-date').value,
+      total_discount_gbp: +(document.getElementById('d-discount').value||0),
+      remarks: document.getElementById('d-remarks').value || null,
+      status: document.getElementById('d-status').value,
+    };
+    if(!isLocal){
+      updatePayload.logistics_cost_gbp = +(document.getElementById('d-logistics')?.value||0);
+      updatePayload.source_unit_id = document.getElementById('d-source-unit')?.value || null;
+      updatePayload.expected_stuffing_date = document.getElementById('d-stuffing-date')?.value || null;
+      updatePayload.vessel_date = document.getElementById('d-vessel-date')?.value || null;
+    } else {
+      updatePayload.vehicle_no = document.getElementById('d-vehicle-no').value || null;
+      updatePayload.urgency_flag = document.getElementById('d-urgency').checked;
+    }
+
+    const { error: orderErr } = await sb.from(table).update(updatePayload).eq('id', o.id);
+    if(orderErr) throw orderErr;
+
+    // items: update existing (editable fields only — never touch snapshot columns),
+    // insert new ones, delete removed ones. This preserves any frozen landed-cost
+    // snapshot on already-processed lines, since those columns are never sent here.
+    for(const it of items){
+      const payload = { product_id: it.product_id, quantity: it.quantity,
+        dispatched_quantity: it.dispatched_quantity||0, special_price_per_roll_gbp: it.special_price_per_roll_gbp };
+      if(it.id){
+        const { error } = await sb.from(itemsTable).update(payload).eq('id', it.id);
+        if(error) throw error;
+      } else {
+        const { error } = await sb.from(itemsTable).insert({ ...payload, [itemFk]: o.id });
+        if(error) throw error;
+      }
+    }
+    if(detailTarget._deletedItemIds?.length){
+      const { error } = await sb.from(itemsTable).delete().in('id', detailTarget._deletedItemIds);
+      if(error) throw error;
+    }
+
+    // re-fetch so the summary shows what the database actually computed
+    const [{data: freshOrder}, {data: freshItems}] = await Promise.all([
+      sb.from(table).select('*').eq('id', o.id).single(),
+      sb.from(itemsTable).select('*').eq(itemFk, o.id),
+    ]);
+    detailTarget.order = freshOrder; detailTarget.items = freshItems||[]; detailTarget._deletedItemIds = [];
+    renderOrderDetail();
+  }catch(err){
+    alert('Save failed: ' + (err.message||err));
+  }finally{
+    saveBtn.disabled = false; saveBtn.textContent = 'Save changes';
+  }
+}
+
+/* =====================================================================
+   DASHBOARD — reads straight from the SQL views, no client-side math at all
+   ===================================================================== */
+let dashSubtab = 'pipeline';
+
+async function renderDashboard(){
+  const el = document.getElementById('view-dashboard');
+  el.innerHTML = `<div class="loading">Loading dashboard…</div>`;
+
+  const [pipelineRes, ledgerRes, directRes, localRes] = await Promise.all([
+    sb.from('v_order_status_pipeline').select('*'),
+    sb.from('v_warehouse_ledger').select('*'),
+    sb.from('v_direct_profit').select('*'),
+    sb.from('v_warehouse_local_profit').select('*'),
+  ]);
+  const pipeline = pipelineRes.data||[], ledger = ledgerRes.data||[], direct = directRes.data||[], local = localRes.data||[];
+
+  const totalDirectProfit = direct.reduce((s,r)=>s+(r.profit_gbp||0),0);
+  const totalLocalProfit = local.reduce((s,r)=>s+(r.profit_gbp||0),0);
+  const totalRollsOnHand = ledger.reduce((s,r)=>s+(r.qty_on_hand||0),0);
+
+  el.innerHTML = `
+    <div class="kpi-row">
+      <div class="kpi"><div class="label">Direct channel profit</div><div class="value ${totalDirectProfit>=0?'pos':'neg'}">${fmt(totalDirectProfit)}</div></div>
+      <div class="kpi"><div class="label">Local delivery profit</div><div class="value ${totalLocalProfit>=0?'pos':'neg'}">${fmt(totalLocalProfit)}</div></div>
+      <div class="kpi"><div class="label">Rolls on hand (all warehouses)</div><div class="value">${totalRollsOnHand}</div></div>
+      <div class="kpi"><div class="label">Open pricing warnings</div><div class="value">—</div></div>
+    </div>
+    <div class="subtabs">
+      <button data-s="pipeline" class="${dashSubtab==='pipeline'?'active':''}">Order pipeline</button>
+      <button data-s="ledger" class="${dashSubtab==='ledger'?'active':''}">Warehouse ledger</button>
+      <button data-s="direct" class="${dashSubtab==='direct'?'active':''}">Direct P&amp;L</button>
+      <button data-s="local" class="${dashSubtab==='local'?'active':''}">Local delivery P&amp;L</button>
+    </div>
+    <div class="card" id="dash-content"></div>
+  `;
+  el.querySelectorAll('.subtabs button').forEach(b=>b.addEventListener('click', ()=>{ dashSubtab=b.dataset.s; drawDashboardContent({pipeline,ledger,direct,local}); }));
+  drawDashboardContent({pipeline,ledger,direct,local});
+}
+
+function drawDashboardContent(data){
+  const content = document.getElementById('dash-content');
+  const { pipeline, ledger, direct, local } = data;
+  if(dashSubtab==='pipeline'){
+    const channels = [...new Set(pipeline.map(r=>r.channel))];
+    content.innerHTML = `<h2>Orders by status, per channel</h2>
+      ${pipeline.length? `<table><thead><tr><th>Channel</th><th>Status</th><th class="num">Orders</th></tr></thead>
+      <tbody>${pipeline.map(r=>`<tr><td>${r.channel}</td><td>${r.status}</td><td class="num">${r.order_count}</td></tr>`).join('')}</tbody></table>`
+      : `<div class="empty">No orders yet.</div>`}`;
+  } else if(dashSubtab==='ledger'){
+    content.innerHTML = `<h2>Live weighted-average landed cost per (warehouse, product)</h2>
+      ${ledger.length? `<table><thead><tr><th>Warehouse</th><th>Product</th><th class="num">Qty on hand</th><th class="num">Avg cost/roll</th></tr></thead>
+      <tbody>${ledger.map(r=>`<tr><td>${r.warehouse_name}</td><td>${r.sku_name}</td><td class="num">${r.qty_on_hand}</td><td class="num">${fmt(r.avg_cost_gbp)}</td></tr>`).join('')}</tbody></table>`
+      : `<div class="empty">No warehouse stock movements yet.</div>`}`;
+  } else if(dashSubtab==='direct'){
+    content.innerHTML = `<h2>Direct-to-customer P&amp;L</h2>
+      ${direct.length? `<table><thead><tr><th>Container</th><th>Customer</th><th class="num">Rolls</th><th class="num">Cost</th><th class="num">Invoice</th><th class="num">Profit</th></tr></thead>
+      <tbody>${direct.map(r=>`<tr><td class="mono">${r.container_no}</td><td>${r.customer_name}</td><td class="num">${r.total_rolls}</td>
+        <td class="num">${fmt(r.total_cost_gbp)}</td><td class="num">${fmt(r.invoice_value_gbp)}</td>
+        <td class="num ${r.profit_gbp>=0?'pos':'neg'}">${fmt(r.profit_gbp)}</td></tr>`).join('')}</tbody></table>`
+      : `<div class="empty">No direct containers yet.</div>`}`;
+  } else {
+    content.innerHTML = `<h2>Local delivery P&amp;L</h2>
+      ${local.length? `<table><thead><tr><th>Order</th><th>Customer</th><th>Product</th><th class="num">Qty</th><th class="num">Cost</th><th class="num">Invoice</th><th class="num">Profit</th></tr></thead>
+      <tbody>${local.map(r=>`<tr><td class="mono">${r.warehouse_order_id}</td><td>${r.customer_name}</td><td>${r.sku_name}</td>
+        <td class="num">${r.quantity}</td><td class="num">${fmt(r.fully_loaded_cost_gbp)}</td><td class="num">${fmt(r.line_total_gbp)}</td>
+        <td class="num ${r.profit_gbp>=0?'pos':'neg'}">${fmt(r.profit_gbp)}</td></tr>`).join('')}</tbody></table>`
+      : `<div class="empty">No delivered local orders yet.</div>`}`;
+  }
+}
+
+/* =====================================================================
+   INIT
+   ===================================================================== */
+checkAuth();
+</script>
+</body>
+</html>
