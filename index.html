@@ -117,8 +117,8 @@
    client-side — RLS (enable_auth_rls.sql) is what actually restricts
    access, not the key itself.
    ===================================================================== */
-const SUPABASE_URL = 'https://hemwfmxgclkoxlidqksm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlbXdmbXhnY2xrb3hsaWRxa3NtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyMzYwNDEsImV4cCI6MjEwMzgxMjA0MX0.dIFesWe0j8-RpMnQDbcuVbSHZXeeDMVJd3GQ70brfXI';
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -775,6 +775,7 @@ function renderOrderDetail(){
         </div>
         <div class="field-row">
           <div class="field"><label>Container no. <span style="font-weight:400;color:var(--ink-soft)">(the real shipping container — fill in once it's actually stuffed/dispatched)</span></label><input type="text" id="d-container-no" value="${o.container_no||''}" placeholder="e.g. MSCU1234567"></div>
+          <div class="field"><label>Dispatch date <span style="font-weight:400;color:var(--ink-soft)">(the date used to look up ex-factory price)</span></label><input type="date" id="d-dispatch-date" value="${o.dispatch_date||''}"></div>
         </div>
         ${!o.source_unit_id ? `<div class="warn-box">No source plant recorded — ex-factory price lookup falls back to any unit's most recent price.</div>` : ''}` : `<div class="field-row">
           <div class="field"><label>Dispatch warehouse</label><div class="mono" style="padding:8px 0">${warehouseName(o.warehouse_id)}</div></div>
@@ -919,7 +920,10 @@ async function saveOrderDetail(){
       status: newStatus,
     };
     const today = todayStr();
-    if(newStatus === 'In Transit' && !o.dispatch_date) updatePayload.dispatch_date = today;
+    if(!isLocal){
+      const manualDispatchDate = document.getElementById('d-dispatch-date')?.value || null;
+      updatePayload.dispatch_date = manualDispatchDate || (newStatus === 'In Transit' && !o.dispatch_date ? today : o.dispatch_date || null);
+    }
     if(DELIVERED_OR_LATER.includes(newStatus) && !o.delivered_date) updatePayload.delivered_date = today;
     if(newStatus === 'Paid' && !o.paid_date) updatePayload.paid_date = today;
     if(!isLocal){
