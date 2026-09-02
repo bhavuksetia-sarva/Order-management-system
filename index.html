@@ -117,8 +117,8 @@
    client-side — RLS (enable_auth_rls.sql) is what actually restricts
    access, not the key itself.
    ===================================================================== */
-const SUPABASE_URL = 'https://hemwfmxgclkoxlidqksm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlbXdmbXhnY2xrb3hsaWRxa3NtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyMzYwNDEsImV4cCI6MjEwMzgxMjA0MX0.dIFesWe0j8-RpMnQDbcuVbSHZXeeDMVJd3GQ70brfXI';
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -170,26 +170,32 @@ sb.auth.onAuthStateChange((event, session)=>{
    happen in Postgres (triggers), never in this file.
    ===================================================================== */
 let PRODUCTS=[], CUSTOMERS=[], AGENTS=[], WAREHOUSES=[], PRODUCTION_UNITS=[];
-let CUSTOMER_ADDRESSES=[]; // {customer_id, address, is_default}
-let CUSTOMER_DEFAULT_AGENT={}; // customer_id -> agent_id, from the most recent commission mapping
+let CUSTOMER_ADDRESSES=[];
+let CUSTOMER_DEFAULT_AGENT={}, CUSTOMER_COMMISSION_PCT={};
+let SELLING_PRICES=[]; // {product_id, customer_id, transaction_type, price_per_roll_gbp, effective_date}
 
 async function loadReferenceData(){
-  const [p, c, a, w, u, ca, cac] = await Promise.all([
+  const [p, c, a, w, u, ca, cac, sp] = await Promise.all([
     sb.from('products').select('id,sku_name').eq('is_active', true).order('sku_name'),
     sb.from('customers').select('id,name,is_warehouse_destination,linked_warehouse_id').order('name'),
     sb.from('agents').select('id,name').order('name'),
     sb.from('warehouses').select('id,name').eq('is_active', true).order('name'),
     sb.from('production_units').select('id,name').eq('is_active', true).order('name'),
     sb.from('customer_delivery_addresses').select('customer_id,address,is_default'),
-    sb.from('customer_agent_commission').select('customer_id,agent_id,effective_date').order('effective_date', {ascending:false}),
+    sb.from('customer_agent_commission').select('customer_id,agent_id,commission_pct,effective_date').order('effective_date', {ascending:false}),
+    sb.from('selling_prices').select('product_id,customer_id,transaction_type,price_per_roll_gbp,effective_date'),
   ]);
   PRODUCTS = p.data || []; CUSTOMERS = c.data || []; AGENTS = a.data || [];
   WAREHOUSES = w.data || []; PRODUCTION_UNITS = u.data || [];
   CUSTOMER_ADDRESSES = ca.data || [];
-  CUSTOMER_DEFAULT_AGENT = {};
+  SELLING_PRICES = sp.data || [];
+  CUSTOMER_DEFAULT_AGENT = {}; CUSTOMER_COMMISSION_PCT = {};
   (cac.data || []).forEach(row => {
-    // sorted by effective_date desc above, so the first hit per customer is the current agent
-    if(!(row.customer_id in CUSTOMER_DEFAULT_AGENT)) CUSTOMER_DEFAULT_AGENT[row.customer_id] = row.agent_id;
+    // sorted by effective_date desc above, so the first hit per customer is the current agent/commission
+    if(!(row.customer_id in CUSTOMER_DEFAULT_AGENT)){
+      CUSTOMER_DEFAULT_AGENT[row.customer_id] = row.agent_id;
+      CUSTOMER_COMMISSION_PCT[row.customer_id] = row.commission_pct;
+    }
   });
 }
 function productName(id){ return PRODUCTS.find(x=>x.id===id)?.sku_name || id; }
@@ -198,6 +204,16 @@ function agentName(id){ return AGENTS.find(x=>x.id===id)?.name || '—'; }
 function warehouseName(id){ return WAREHOUSES.find(x=>x.id===id)?.name || id; }
 function unitName(id){ return PRODUCTION_UNITS.find(x=>x.id===id)?.name || '—'; }
 function addressesForCustomer(customerId){ return CUSTOMER_ADDRESSES.filter(a=>a.customer_id===customerId); }
+// Mirrors fn_selling_price(): most recent effective_date <= asOf, for this
+// exact (product, customer, transaction_type). Returns null if none on file —
+// callers should show that plainly rather than guess, matching how the real
+// invoicing trigger bills £0 + a pricing_warnings row when this happens.
+function sellingPrice(productId, customerId, transactionType, asOf){
+  const rows = SELLING_PRICES.filter(r=>r.product_id===productId && r.customer_id===customerId
+    && r.transaction_type===transactionType && r.effective_date<=asOf)
+    .sort((a,b)=>b.effective_date.localeCompare(a.effective_date));
+  return rows.length ? rows[0].price_per_roll_gbp : null;
+}
 function optionsHtml(list, labelFn, selected){
   return list.map(x=>`<option value="${x.id}" ${x.id===selected?'selected':''}>${labelFn(x)}</option>`).join('');
 }
@@ -291,6 +307,7 @@ function renderOrderForm(today){
 
     <h2 style="margin-top:18px">Line items</h2>
     <table><thead><tr><th>Product</th><th style="width:90px">Qty (rolls)</th>
+      ${!isTransfer? '<th class="num" style="width:110px">Selling price</th>':''}
       ${!isTransfer && !isWarehouseBound? '<th style="width:130px">Special price /roll</th>':''}<th style="width:40px"></th></tr></thead>
       <tbody id="line-items-body"></tbody></table>
     <button class="add-line" id="add-line-btn" style="margin-top:8px">+ Add line item</button>
@@ -308,6 +325,8 @@ function renderOrderForm(today){
     renderLineItems(); updateOrderSummary();
   });
   formCard.querySelectorAll('input,select').forEach(inp=>inp.addEventListener('input', updateOrderSummary));
+  const orderDateEl = document.getElementById('f-order-date');
+  if(orderDateEl) orderDateEl.addEventListener('input', ()=>{ renderLineItems(); updateOrderSummary(); });
   document.getElementById('submit-order-btn').addEventListener('click', submitOrder);
 
   // Auto-fill delivery address (dropdown if multiple on file) + auto-select
@@ -351,22 +370,40 @@ function onOrderCustomerChanged(customerId){
     const agentId = CUSTOMER_DEFAULT_AGENT[customerId];
     agentSelect.value = agentId || '';
   }
+  renderLineItems();
   updateOrderSummary();
+}
+
+function currentFormCustomerId(){
+  if(currentOrderType==='transfer') return null;
+  const el = document.getElementById(currentOrderType==='local' ? 'f-customer' : 'f-primary');
+  return el ? el.value : null;
+}
+function currentFormOrderDate(){
+  const el = document.getElementById('f-order-date');
+  return (el && el.value) ? el.value : todayStr();
 }
 
 function renderLineItems(){
   const body = document.getElementById('line-items-body');
   const isTransfer = currentOrderType==='transfer';
   const isWarehouseBound = currentOrderType==='warehouse_bound';
-  body.innerHTML = draftItems.map((it,idx)=>`
+  const custId = currentFormCustomerId();
+  const orderDate = currentFormOrderDate();
+  body.innerHTML = draftItems.map((it,idx)=>{
+    const price = (!isTransfer && custId) ? sellingPrice(it.product_id, custId, 'standard', orderDate) : null;
+    return `
     <tr>
       <td><select data-idx="${idx}" data-f="product_id">${optionsHtml(PRODUCTS,p=>p.sku_name,it.product_id)}</select></td>
       <td><input type="number" min="1" data-idx="${idx}" data-f="quantity" value="${it.quantity}" style="width:80px"></td>
+      ${!isTransfer ? `<td class="mono num" style="padding-top:12px">${price!=null?fmt(price):'—'}</td>` : ''}
       ${!isTransfer && !isWarehouseBound ? `<td><input type="number" min="0" step="0.01" data-idx="${idx}" data-f="special_price" value="${it.special_price}" placeholder="optional" style="width:110px"></td>` : ''}
       <td>${draftItems.length>1?`<button class="btn small secondary" data-remove="${idx}">×</button>`:''}</td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
   body.querySelectorAll('[data-f]').forEach(inp=>inp.addEventListener('input', e=>{
     draftItems[+e.target.dataset.idx][e.target.dataset.f] = e.target.value;
+    if(e.target.dataset.f==='product_id') renderLineItems();
     updateOrderSummary();
   }));
   body.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click', e=>{
@@ -379,11 +416,27 @@ function updateOrderSummary(){
   const items = draftItems.filter(it=>it.quantity && +it.quantity>0);
   if(!items.length){ card.innerHTML = `<h2>Order summary</h2><div class="empty">Add at least one line item with a quantity.</div>`; return; }
   const totalRolls = items.reduce((s,i)=>s+ +i.quantity,0);
+  const custId = currentFormCustomerId();
+  const orderDate = currentFormOrderDate();
+  let estimatedSubtotal = 0, anyMissingPrice = false;
+  const rows = items.map(r=>{
+    const price = custId ? sellingPrice(r.product_id, custId, 'standard', orderDate) : null;
+    if(price==null) anyMissingPrice = true;
+    const lineTotal = price!=null ? price * +r.quantity : null;
+    if(lineTotal!=null) estimatedSubtotal += lineTotal;
+    return { name: productName(r.product_id), qty: r.quantity, price, lineTotal };
+  });
+  const commissionPct = custId ? CUSTOMER_COMMISSION_PCT[custId] : null;
+  const estCommission = (commissionPct!=null) ? estimatedSubtotal * commissionPct : null;
+
   card.innerHTML = `<h2>Order summary</h2>
-    <table><thead><tr><th>Product</th><th class="num">Qty ordered</th></tr></thead>
-    <tbody>${items.map(r=>`<tr><td>${productName(r.product_id)}</td><td class="num">${r.quantity}</td></tr>`).join('')}</tbody></table>
+    <table><thead><tr><th>Product</th><th class="num">Qty</th><th class="num">Selling price</th><th class="num">Line est.</th></tr></thead>
+    <tbody>${rows.map(r=>`<tr><td>${r.name}</td><td class="num">${r.qty}</td><td class="num">${r.price!=null?fmt(r.price):'—'}</td><td class="num">${r.lineTotal!=null?fmt(r.lineTotal):'—'}</td></tr>`).join('')}</tbody></table>
     <div class="summary-line total"><span>Total rolls ordered</span><span>${totalRolls}</span></div>
-    <p class="helptext" style="margin-top:14px">No invoice value or profit shown here — those depend on dispatched quantity, computed by the database once this order is opened from the Order Book and marked Delivered.</p>`;
+    ${custId ? `<div class="summary-line"><span>Estimated subtotal (list price)</span><span>${fmt(estimatedSubtotal)}</span></div>
+    <div class="summary-line"><span>Agent commission${commissionPct!=null?` (${(commissionPct*100).toFixed(2)}%)`:''}</span><span>${estCommission!=null?fmt(estCommission):'—'}</span></div>` : `<p class="helptext">Select a customer to see selling price and commission estimates.</p>`}
+    ${anyMissingPrice ? `<p class="helptext" style="color:var(--negative)">No selling price on file for one or more lines — that line will bill at £0 until a price is added.</p>` : ''}
+    <p class="helptext" style="margin-top:14px">Estimate at list price and current commission rate only — the real invoice depends on dispatched quantity, VAT, and discount, computed by the database once this order is Delivered.</p>`;
 }
 
 async function submitOrder(){
@@ -609,15 +662,15 @@ function drawOrderList(){
       return `<button data-s="${s}" class="${obStatusTab===s?'active':''}">${s} (${n})</button>`;
     }).join('')}</div>` : ''}
     ${visibleRows.length? `<table><thead><tr><th>Reference</th><th>${obTypeTab==='transfer'?'Route':'Customer'}</th>
-      <th>Products</th><th>Qty</th><th>Delivery address</th><th>Order date</th><th>Status</th><th class="num">Value</th></tr></thead>
+      <th>Products</th><th>Qty</th><th>Order date</th><th>Requested date</th><th>Status</th><th>Remarks</th></tr></thead>
     <tbody>${visibleRows.map((r,i)=>`<tr class="order-row" data-idx="${i}"><td class="mono"><span style="color:var(--accent-ink);text-decoration:underline">${r.id}</span></td>
       <td>${r.who}</td>
       <td style="max-width:220px">${r.products||'—'}</td>
       <td class="mono">${r.qtys||'—'}</td>
-      <td>${r.deliveryAddress||'—'}</td>
       <td class="mono">${r.date||''}</td>
+      <td class="mono">${r.customerRequestedDate||'—'}</td>
       <td><span class="badge ${DELIVERED_OR_LATER.includes(r.status)||r.status==='Processed'?'delivered':''}">${r.status}</span></td>
-      <td class="num">${r.value===null?'—':fmt(r.value)}</td></tr>`).join('')}</tbody></table>`
+      <td style="max-width:200px">${r.remarks||'—'}</td></tr>`).join('')}</tbody></table>`
     : `<div class="empty">No orders match${obSearchTerm||activeFilterCount?' your search/filters':' this status'}.</div>`}
   </div>`;
 
@@ -733,7 +786,7 @@ function renderOrderDetail(){
         ${wasProcessed ? `<p class="helptext">This order's cost/ledger figures are already computed and frozen. Editing quantities here won't recompute them.</p>`
           : `<p class="helptext">Dispatched quantity can differ from ordered. Saving with status Delivered / Paid uses whatever is entered here.</p>`}
         <h2 style="margin-top:18px">Related Order Items</h2>
-        <table><thead><tr><th>Product</th><th class="num">Quantity</th><th class="num">Dispatched</th><th class="num">Special price</th><th></th></tr></thead>
+        <table><thead><tr><th>Product</th><th class="num">Quantity</th><th class="num">Dispatched</th><th class="num">Selling price</th><th class="num">Special price</th><th></th></tr></thead>
           <tbody id="detail-items-body"></tbody></table>
         <button class="add-line" id="detail-add-line" style="margin-top:8px">+ Add line item</button>
       </div></div>
@@ -754,37 +807,97 @@ function renderOrderDetail(){
 
 function renderDetailItems(){
   const body = document.getElementById('detail-items-body');
-  const items = detailTarget.items;
-  body.innerHTML = items.map((it,idx)=>`
+  const { items, order: o, isLocal } = detailTarget;
+  body.innerHTML = items.map((it,idx)=>{
+    const price = o.customer_id ? sellingPrice(it.product_id, o.customer_id, isLocal?(it.transaction_type||'standard'):'standard', o.order_date) : null;
+    return `
     <tr>
       <td><select data-idx="${idx}" data-f="product_id">${optionsHtml(PRODUCTS,p=>p.sku_name,it.product_id)}</select></td>
       <td><input type="number" min="0" data-idx="${idx}" data-f="quantity" value="${it.quantity}" style="width:80px;text-align:right"></td>
       <td><input type="number" min="0" data-idx="${idx}" data-f="dispatched_quantity" value="${it.dispatched_quantity||0}" style="width:80px;text-align:right"></td>
+      <td class="mono num">${price!=null?fmt(price):'—'}</td>
       <td><input type="number" min="0" step="0.01" data-idx="${idx}" data-f="special_price_per_roll_gbp" value="${it.special_price_per_roll_gbp||''}" style="width:90px;text-align:right" placeholder="optional"></td>
       <td>${items.length>1?`<button class="btn small secondary" data-remove="${idx}">×</button>`:''}</td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
   body.querySelectorAll('[data-f]').forEach(inp=>inp.addEventListener('input', e=>{
     const idx=+e.target.dataset.idx, f=e.target.dataset.f;
     detailTarget.items[idx][f] = f==='product_id' ? e.target.value : (e.target.value===''?null:+e.target.value);
+    if(f==='product_id') renderDetailItems();
+    renderDetailSummary();
   }));
   body.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click', e=>{
     const idx = +e.target.dataset.remove;
     const removed = detailTarget.items.splice(idx,1)[0];
     if(removed.id) detailTarget._deletedItemIds = [...(detailTarget._deletedItemIds||[]), removed.id];
     renderDetailItems();
+    renderDetailSummary();
   }));
 }
 
 function renderDetailSummary(){
   const box = document.getElementById('detail-summary');
   const { isLocal, order: o, items } = detailTarget;
-  box.innerHTML = `<h2>Figures on file (from the database)</h2>
-    <div class="summary-line"><span>Invoice value</span><span class="v mono">${fmt(o.invoice_value_gbp)}</span></div>
-    <div class="summary-line"><span>Commission</span><span class="v mono">${fmt(o.commission_value_gbp)}</span></div>
-    ${isLocal ? `<h2 style="margin-top:18px">Line item cost (if delivered)</h2>
-      <table><thead><tr><th>Product</th><th class="num">Landed</th><th class="num">Overhead</th><th class="num">Delivery</th></tr></thead>
-      <tbody>${items.map(it=>`<tr><td>${productName(it.product_id)}</td><td class="num">${fmt(it.landed_cost_total_gbp)}</td><td class="num">${fmt(it.overhead_snapshot_gbp)}</td><td class="num">${fmt(it.delivery_cost_snapshot_gbp)}</td></tr>`).join('')}</tbody></table>` : ''}
-    <p class="helptext" style="margin-top:14px">These are the actual values already computed by the database — not a live estimate. They update after you click Save, since Postgres triggers recalculate on every change.</p>`;
+  const commissionPct = o.customer_id ? CUSTOMER_COMMISSION_PCT[o.customer_id] : null;
+  const processed = !isLocal ? items.some(it=>it.ex_factory_snapshot_written_at) : items.some(it=>it.snapshot_written_at);
+
+  let breakdownHtml;
+  if(processed){
+    // REAL frozen figures already on the rows — this is exactly how the
+    // profit number was actually computed, not an estimate
+    if(!isLocal){
+      const exTotal = items.reduce((s,it)=>s+(it.ex_factory_cost_total_gbp||0),0);
+      const totalCost = exTotal + (o.logistics_cost_gbp||0);
+      breakdownHtml = `
+        <table><thead><tr><th>Product</th><th class="num">Ex-factory £/roll</th><th class="num">Ex-factory cost</th></tr></thead>
+        <tbody>${items.map(it=>`<tr><td>${productName(it.product_id)}</td><td class="num">${fmt(it.ex_factory_price_snapshot_gbp)}</td><td class="num">${fmt(it.ex_factory_cost_total_gbp)}</td></tr>`).join('')}</tbody></table>
+        <div class="summary-line"><span>Total ex-factory cost</span><span class="mono">${fmt(exTotal)}</span></div>
+        <div class="summary-line"><span>+ Logistics cost</span><span class="mono">${fmt(o.logistics_cost_gbp)}</span></div>
+        <div class="summary-line total"><span>= Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
+        <div class="summary-line" style="margin-top:10px"><span>Invoice value (incl. VAT, after discount)</span><span class="mono">${fmt(o.invoice_value_gbp)}</span></div>
+        <div class="summary-line"><span>− Commission${commissionPct!=null?` (${(commissionPct*100).toFixed(2)}%)`:''}</span><span class="mono">${fmt(o.commission_value_gbp)}</span></div>
+        <div class="summary-line total"><span>− Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
+        <div class="summary-line total ${((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)>=0?'pos':'neg'}"><span>= Profit</span><span class="mono">${fmt((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)}</span></div>`;
+    } else {
+      const landed = items.reduce((s,it)=>s+(it.landed_cost_total_gbp||0),0);
+      const overhead = items.reduce((s,it)=>s+(it.overhead_snapshot_gbp||0),0);
+      const delivery = items.reduce((s,it)=>s+(it.delivery_cost_snapshot_gbp||0),0);
+      const totalCost = landed + overhead + delivery;
+      breakdownHtml = `
+        <table><thead><tr><th>Product</th><th class="num">Landed</th><th class="num">Overhead</th><th class="num">Delivery</th></tr></thead>
+        <tbody>${items.map(it=>`<tr><td>${productName(it.product_id)}</td><td class="num">${fmt(it.landed_cost_total_gbp)}</td><td class="num">${fmt(it.overhead_snapshot_gbp)}</td><td class="num">${fmt(it.delivery_cost_snapshot_gbp)}</td></tr>`).join('')}</tbody></table>
+        <div class="summary-line"><span>Landed cost (ex-factory + container logistics share)</span><span class="mono">${fmt(landed)}</span></div>
+        <div class="summary-line"><span>+ Warehouse overhead</span><span class="mono">${fmt(overhead)}</span></div>
+        <div class="summary-line"><span>+ Local delivery cost</span><span class="mono">${fmt(delivery)}</span></div>
+        <div class="summary-line total"><span>= Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
+        <div class="summary-line" style="margin-top:10px"><span>Invoice value (incl. VAT, after discount)</span><span class="mono">${fmt(o.invoice_value_gbp)}</span></div>
+        <div class="summary-line"><span>− Commission${commissionPct!=null?` (${(commissionPct*100).toFixed(2)}%)`:''}</span><span class="mono">${fmt(o.commission_value_gbp)}</span></div>
+        <div class="summary-line total"><span>− Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
+        <div class="summary-line total ${((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)>=0?'pos':'neg'}"><span>= Profit</span><span class="mono">${fmt((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)}</span></div>`;
+    }
+  } else {
+    // not yet processed — no frozen cost exists yet, show what CAN be
+    // known now: selling price × quantity and the commission rate
+    let estSubtotal = 0;
+    items.forEach(it=>{
+      const price = o.customer_id ? sellingPrice(it.product_id, o.customer_id, isLocal?(it.transaction_type||'standard'):'standard', o.order_date) : null;
+      if(price!=null) estSubtotal += price * (it.quantity||0);
+    });
+    const estCommission = commissionPct!=null ? estSubtotal * commissionPct : null;
+    breakdownHtml = `
+      <div class="summary-line"><span>Estimated subtotal (list price × qty)</span><span class="mono">${fmt(estSubtotal)}</span></div>
+      <div class="summary-line"><span>Agent commission${commissionPct!=null?` (${(commissionPct*100).toFixed(2)}%)`:''}</span><span class="mono">${estCommission!=null?fmt(estCommission):'—'}</span></div>
+      <p class="helptext" style="margin-top:10px">Ex-factory cost and logistics aren't determined yet — those freeze once this order reaches In Transit (direct) or is Delivered (local), using dispatched quantity at that point.</p>`;
+  }
+
+  box.innerHTML = `<h2>${processed?'How this profit was calculated':'Estimated figures'}</h2>
+    <div class="summary-line"><span>Invoice value on file</span><span class="v mono">${fmt(o.invoice_value_gbp)}</span></div>
+    <div class="summary-line"><span>Commission on file</span><span class="v mono">${fmt(o.commission_value_gbp)}</span></div>
+    <h2 style="margin-top:18px">${processed?'Breakdown':'Estimate'}</h2>
+    ${breakdownHtml}
+    <p class="helptext" style="margin-top:14px">${processed
+      ? 'These are the actual frozen values the database computed — permanent, never recalculated after the fact.'
+      : 'This is a live estimate only — the real invoice, cost, and profit are computed by the database once this order is processed.'}</p>`;
 }
 
 async function saveOrderDetail(){
@@ -893,7 +1006,11 @@ async function renderDashboard(){
     </div>
     <div class="card" id="dash-content"></div>
   `;
-  el.querySelectorAll('.subtabs button').forEach(b=>b.addEventListener('click', ()=>{ dashSubtab=b.dataset.s; drawDashboardContent({pipeline,ledger,direct,local}); }));
+  el.querySelectorAll('.subtabs button').forEach(b=>b.addEventListener('click', ()=>{
+    dashSubtab=b.dataset.s;
+    el.querySelectorAll('.subtabs button').forEach(x=>x.classList.toggle('active', x.dataset.s===dashSubtab));
+    drawDashboardContent({pipeline,ledger,direct,local});
+  }));
   drawDashboardContent({pipeline,ledger,direct,local});
 }
 
@@ -913,18 +1030,26 @@ function drawDashboardContent(data){
       : `<div class="empty">No warehouse stock movements yet.</div>`}`;
   } else if(dashSubtab==='direct'){
     content.innerHTML = `<h2>Direct-to-customer P&amp;L</h2>
+      <p class="helptext" style="margin-bottom:10px">Click any row to see exactly how its cost and profit were calculated.</p>
       ${direct.length? `<table><thead><tr><th>Container</th><th>Customer</th><th class="num">Rolls</th><th class="num">Cost</th><th class="num">Invoice</th><th class="num">Profit</th></tr></thead>
-      <tbody>${direct.map(r=>`<tr><td class="mono">${r.order_no}</td><td>${r.customer_name}</td><td class="num">${r.total_rolls}</td>
+      <tbody>${direct.map((r,i)=>`<tr class="pl-row" data-idx="${i}" style="cursor:pointer"><td class="mono"><span style="color:var(--accent-ink);text-decoration:underline">${r.order_no}</span></td><td>${r.customer_name}</td><td class="num">${r.total_rolls}</td>
         <td class="num">${fmt(r.total_cost_gbp)}</td><td class="num">${fmt(r.invoice_value_gbp)}</td>
         <td class="num ${r.profit_gbp>=0?'pos':'neg'}">${fmt(r.profit_gbp)}</td></tr>`).join('')}</tbody></table>`
       : `<div class="empty">No direct containers yet.</div>`}`;
+    content.querySelectorAll('.pl-row').forEach(tr=>tr.addEventListener('click', ()=>{
+      openOrderDetail('direct', false, direct[+tr.dataset.idx].container_id);
+    }));
   } else {
     content.innerHTML = `<h2>Local delivery P&amp;L</h2>
+      <p class="helptext" style="margin-bottom:10px">Click any row to see exactly how its cost and profit were calculated.</p>
       ${local.length? `<table><thead><tr><th>Order</th><th>Customer</th><th>Product</th><th class="num">Qty</th><th class="num">Cost</th><th class="num">Invoice</th><th class="num">Profit</th></tr></thead>
-      <tbody>${local.map(r=>`<tr><td class="mono">${r.order_no}</td><td>${r.customer_name}</td><td>${r.sku_name}</td>
+      <tbody>${local.map((r,i)=>`<tr class="pl-row" data-idx="${i}" style="cursor:pointer"><td class="mono"><span style="color:var(--accent-ink);text-decoration:underline">${r.order_no}</span></td><td>${r.customer_name}</td><td>${r.sku_name}</td>
         <td class="num">${r.quantity}</td><td class="num">${fmt(r.fully_loaded_cost_gbp)}</td><td class="num">${fmt(r.line_total_gbp)}</td>
         <td class="num ${r.profit_gbp>=0?'pos':'neg'}">${fmt(r.profit_gbp)}</td></tr>`).join('')}</tbody></table>`
       : `<div class="empty">No delivered local orders yet.</div>`}`;
+    content.querySelectorAll('.pl-row').forEach(tr=>tr.addEventListener('click', ()=>{
+      openOrderDetail('local', true, local[+tr.dataset.idx].warehouse_order_id);
+    }));
   }
 }
 
