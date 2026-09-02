@@ -117,8 +117,8 @@
    client-side — RLS (enable_auth_rls.sql) is what actually restricts
    access, not the key itself.
    ===================================================================== */
-const SUPABASE_URL = 'https://hemwfmxgclkoxlidqksm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlbXdmbXhnY2xrb3hsaWRxa3NtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyMzYwNDEsImV4cCI6MjEwMzgxMjA0MX0.dIFesWe0j8-RpMnQDbcuVbSHZXeeDMVJd3GQ70brfXI';
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -173,9 +173,10 @@ let PRODUCTS=[], CUSTOMERS=[], AGENTS=[], WAREHOUSES=[], PRODUCTION_UNITS=[];
 let CUSTOMER_ADDRESSES=[];
 let CUSTOMER_DEFAULT_AGENT={}, CUSTOMER_COMMISSION_PCT={};
 let SELLING_PRICES=[]; // {product_id, customer_id, transaction_type, price_per_roll_gbp, effective_date}
+let EX_FACTORY_PRICES=[]; // {product_id, unit_id, price_gbp, effective_date}
 
 async function loadReferenceData(){
-  const [p, c, a, w, u, ca, cac, sp] = await Promise.all([
+  const [p, c, a, w, u, ca, cac, sp, ep] = await Promise.all([
     sb.from('products').select('id,sku_name').eq('is_active', true).order('sku_name'),
     sb.from('customers').select('id,name,is_warehouse_destination,linked_warehouse_id').order('name'),
     sb.from('agents').select('id,name').order('name'),
@@ -184,11 +185,13 @@ async function loadReferenceData(){
     sb.from('customer_delivery_addresses').select('customer_id,address,is_default'),
     sb.from('customer_agent_commission').select('customer_id,agent_id,commission_pct,effective_date').order('effective_date', {ascending:false}),
     sb.from('selling_prices').select('product_id,customer_id,transaction_type,price_per_roll_gbp,effective_date'),
+    sb.from('ex_factory_prices').select('product_id,unit_id,price_gbp,effective_date'),
   ]);
   PRODUCTS = p.data || []; CUSTOMERS = c.data || []; AGENTS = a.data || [];
   WAREHOUSES = w.data || []; PRODUCTION_UNITS = u.data || [];
   CUSTOMER_ADDRESSES = ca.data || [];
   SELLING_PRICES = sp.data || [];
+  EX_FACTORY_PRICES = ep.data || [];
   CUSTOMER_DEFAULT_AGENT = {}; CUSTOMER_COMMISSION_PCT = {};
   (cac.data || []).forEach(row => {
     // sorted by effective_date desc above, so the first hit per customer is the current agent/commission
@@ -213,6 +216,25 @@ function sellingPrice(productId, customerId, transactionType, asOf){
     && r.transaction_type===transactionType && r.effective_date<=asOf)
     .sort((a,b)=>b.effective_date.localeCompare(a.effective_date));
   return rows.length ? rows[0].price_per_roll_gbp : null;
+}
+// Mirrors fn_ex_factory_price() exactly, including its fallback to any
+// unit's price if none is on file for the specific plant. CONFIRMED: no
+// freezing — this is called live, every render, driven by dispatch_date.
+// Callers must separately enforce "no dispatch_date -> £0" themselves,
+// matching v_direct_profit's rule (this function alone doesn't know that
+// rule, since dispatch_date might legitimately be null for other reasons).
+function exFactoryPrice(productId, unitId, asOf){
+  if(unitId){
+    const rows = EX_FACTORY_PRICES.filter(r=>r.product_id===productId && r.unit_id===unitId && r.effective_date<=asOf)
+      .sort((a,b)=>b.effective_date.localeCompare(a.effective_date));
+    if(rows.length) return rows[0].price_gbp;
+    const earliestForUnit = EX_FACTORY_PRICES.filter(r=>r.product_id===productId && r.unit_id===unitId)
+      .sort((a,b)=>a.effective_date.localeCompare(b.effective_date))[0];
+    if(earliestForUnit) return earliestForUnit.price_gbp;
+  }
+  const anyRows = EX_FACTORY_PRICES.filter(r=>r.product_id===productId && r.effective_date<=asOf)
+    .sort((a,b)=>b.effective_date.localeCompare(a.effective_date));
+  return anyRows.length ? anyRows[0].price_gbp : null;
 }
 function optionsHtml(list, labelFn, selected){
   return list.map(x=>`<option value="${x.id}" ${x.id===selected?'selected':''}>${labelFn(x)}</option>`).join('');
@@ -747,7 +769,10 @@ function renderOrderDetail(){
       <div><div class="card">
         <h2>Order details</h2>
         <div class="field-row">
-          <div class="field"><label>Customer</label><div class="mono" style="padding:8px 0">${customerName(o.customer_id)}</div></div>
+          <div class="field"><label>Customer</label><select id="d-customer">${optionsHtml(
+            isLocal ? CUSTOMERS.filter(c=>!c.is_warehouse_destination)
+                    : CUSTOMERS.filter(c=> !!c.is_warehouse_destination === !!o.destination_warehouse_id),
+            c=>c.name, o.customer_id)}</select></div>
           <div class="field"><label>Order ID</label><div class="mono" style="padding:8px 0">${referenceLabel}</div></div>
           <div class="field"><label>Order date</label><input type="date" id="d-order-date" value="${o.order_date||''}"></div>
         </div>
@@ -800,6 +825,21 @@ function renderOrderDetail(){
 
   document.getElementById('detail-back').addEventListener('click', closeOrderDetail);
   document.getElementById('detail-save').addEventListener('click', saveOrderDetail);
+  document.getElementById('d-customer').addEventListener('change', e=>{
+    detailTarget.order.customer_id = e.target.value;
+    renderDetailItems();
+    renderDetailSummary();
+  });
+  if(!isLocal){
+    document.getElementById('d-dispatch-date').addEventListener('input', e=>{
+      detailTarget.order.dispatch_date = e.target.value || null;
+      renderDetailSummary();
+    });
+    document.getElementById('d-source-unit').addEventListener('change', e=>{
+      detailTarget.order.source_unit_id = e.target.value || null;
+      renderDetailSummary();
+    });
+  }
   document.getElementById('detail-add-line').addEventListener('click', ()=>{
     detailTarget.items.push({product_id:PRODUCTS[0]?.id, quantity:0, dispatched_quantity:0, special_price_per_roll_gbp:null, _new:true});
     renderDetailItems();
@@ -840,26 +880,42 @@ function renderDetailSummary(){
   const box = document.getElementById('detail-summary');
   const { isLocal, order: o, items } = detailTarget;
   const commissionPct = o.customer_id ? CUSTOMER_COMMISSION_PCT[o.customer_id] : null;
-  const processed = !isLocal ? items.some(it=>it.ex_factory_snapshot_written_at) : items.some(it=>it.snapshot_written_at);
 
-  let breakdownHtml;
-  if(processed){
-    // REAL frozen figures already on the rows — this is exactly how the
-    // profit number was actually computed, not an estimate
-    if(!isLocal){
-      const exTotal = items.reduce((s,it)=>s+(it.ex_factory_cost_total_gbp||0),0);
-      const totalCost = exTotal + (o.logistics_cost_gbp||0);
-      breakdownHtml = `
-        <table><thead><tr><th>Product</th><th class="num">Ex-factory £/roll</th><th class="num">Ex-factory cost</th></tr></thead>
-        <tbody>${items.map(it=>`<tr><td>${productName(it.product_id)}</td><td class="num">${fmt(it.ex_factory_price_snapshot_gbp)}</td><td class="num">${fmt(it.ex_factory_cost_total_gbp)}</td></tr>`).join('')}</tbody></table>
-        <div class="summary-line"><span>Total ex-factory cost</span><span class="mono">${fmt(exTotal)}</span></div>
-        <div class="summary-line"><span>+ Logistics cost</span><span class="mono">${fmt(o.logistics_cost_gbp)}</span></div>
-        <div class="summary-line total"><span>= Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
-        <div class="summary-line" style="margin-top:10px"><span>Invoice value (incl. VAT, after discount)</span><span class="mono">${fmt(o.invoice_value_gbp)}</span></div>
-        <div class="summary-line"><span>− Commission${commissionPct!=null?` (${(commissionPct*100).toFixed(2)}%)`:''}</span><span class="mono">${fmt(o.commission_value_gbp)}</span></div>
-        <div class="summary-line total"><span>− Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
-        <div class="summary-line total ${((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)>=0?'pos':'neg'}"><span>= Profit</span><span class="mono">${fmt((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)}</span></div>`;
-    } else {
+  let breakdownHtml, headerLabel;
+
+  if(!isLocal){
+    // DIRECT CONTAINERS: always live, never frozen — CONFIRMED decision.
+    // £0 ex-factory cost until dispatch_date is set; moves automatically
+    // after that if dispatch date, source plant, or dispatched quantity change.
+    headerLabel = 'How this profit is calculated (live)';
+    const hasDispatchDate = !!o.dispatch_date;
+    const exTotal = hasDispatchDate
+      ? items.reduce((s,it)=>s + (it.dispatched_quantity||0) * (exFactoryPrice(it.product_id, o.source_unit_id, o.dispatch_date) ?? 0), 0)
+      : 0;
+    const totalCost = exTotal + (o.logistics_cost_gbp||0);
+    const profit = (o.invoice_value_gbp||0) - (o.commission_value_gbp||0) - totalCost;
+    breakdownHtml = `
+      <table><thead><tr><th>Product</th><th class="num">Ex-factory £/roll</th><th class="num">Ex-factory cost</th></tr></thead>
+      <tbody>${items.map(it=>{
+        const px = hasDispatchDate ? exFactoryPrice(it.product_id, o.source_unit_id, o.dispatch_date) : null;
+        const cost = (px!=null && hasDispatchDate) ? px * (it.dispatched_quantity||0) : 0;
+        return `<tr><td>${productName(it.product_id)}</td><td class="num">${px!=null?fmt(px):'—'}</td><td class="num">${fmt(cost)}</td></tr>`;
+      }).join('')}</tbody></table>
+      ${!hasDispatchDate ? `<p class="helptext" style="color:var(--negative)">No dispatch date set — ex-factory cost shows £0 until one is entered.</p>` : ''}
+      <div class="summary-line"><span>Total ex-factory cost</span><span class="mono">${fmt(exTotal)}</span></div>
+      <div class="summary-line"><span>+ Logistics cost</span><span class="mono">${fmt(o.logistics_cost_gbp)}</span></div>
+      <div class="summary-line total"><span>= Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
+      <div class="summary-line" style="margin-top:10px"><span>Invoice value (incl. VAT, after discount)</span><span class="mono">${fmt(o.invoice_value_gbp)}</span></div>
+      <div class="summary-line"><span>− Commission${commissionPct!=null?` (${(commissionPct*100).toFixed(2)}%)`:''}</span><span class="mono">${fmt(o.commission_value_gbp)}</span></div>
+      <div class="summary-line total"><span>− Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
+      <div class="summary-line total ${profit>=0?'pos':'neg'}"><span>= Profit</span><span class="mono">${fmt(profit)}</span></div>
+      <p class="helptext" style="margin-top:14px">Ex-factory cost is computed live from the dispatch date shown above — not frozen. It will change automatically if dispatch date, source plant, dispatched quantity, or the underlying price data changes.</p>`;
+  } else {
+    // LOCAL DELIVERY: unchanged — landed cost still freezes once, at Delivered,
+    // via the warehouse ledger (a different mechanism, not touched by this change)
+    const processed = items.some(it=>it.snapshot_written_at);
+    headerLabel = processed ? 'How this profit was calculated' : 'Estimated figures';
+    if(processed){
       const landed = items.reduce((s,it)=>s+(it.landed_cost_total_gbp||0),0);
       const overhead = items.reduce((s,it)=>s+(it.overhead_snapshot_gbp||0),0);
       const delivery = items.reduce((s,it)=>s+(it.delivery_cost_snapshot_gbp||0),0);
@@ -874,31 +930,27 @@ function renderDetailSummary(){
         <div class="summary-line" style="margin-top:10px"><span>Invoice value (incl. VAT, after discount)</span><span class="mono">${fmt(o.invoice_value_gbp)}</span></div>
         <div class="summary-line"><span>− Commission${commissionPct!=null?` (${(commissionPct*100).toFixed(2)}%)`:''}</span><span class="mono">${fmt(o.commission_value_gbp)}</span></div>
         <div class="summary-line total"><span>− Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
-        <div class="summary-line total ${((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)>=0?'pos':'neg'}"><span>= Profit</span><span class="mono">${fmt((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)}</span></div>`;
+        <div class="summary-line total ${((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)>=0?'pos':'neg'}"><span>= Profit</span><span class="mono">${fmt((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)}</span></div>
+        <p class="helptext" style="margin-top:14px">These are the actual frozen values the database computed — permanent, never recalculated after the fact.</p>`;
+    } else {
+      let estSubtotal = 0;
+      items.forEach(it=>{
+        const price = o.customer_id ? sellingPrice(it.product_id, o.customer_id, it.transaction_type||'standard', o.order_date) : null;
+        if(price!=null) estSubtotal += price * (it.quantity||0);
+      });
+      const estCommission = commissionPct!=null ? estSubtotal * commissionPct : null;
+      breakdownHtml = `
+        <div class="summary-line"><span>Estimated subtotal (list price × qty)</span><span class="mono">${fmt(estSubtotal)}</span></div>
+        <div class="summary-line"><span>Agent commission${commissionPct!=null?` (${(commissionPct*100).toFixed(2)}%)`:''}</span><span class="mono">${estCommission!=null?fmt(estCommission):'—'}</span></div>
+        <p class="helptext" style="margin-top:10px">Landed cost isn't determined yet — that freezes once this order is Delivered, using dispatched quantity at that point.</p>`;
     }
-  } else {
-    // not yet processed — no frozen cost exists yet, show what CAN be
-    // known now: selling price × quantity and the commission rate
-    let estSubtotal = 0;
-    items.forEach(it=>{
-      const price = o.customer_id ? sellingPrice(it.product_id, o.customer_id, isLocal?(it.transaction_type||'standard'):'standard', o.order_date) : null;
-      if(price!=null) estSubtotal += price * (it.quantity||0);
-    });
-    const estCommission = commissionPct!=null ? estSubtotal * commissionPct : null;
-    breakdownHtml = `
-      <div class="summary-line"><span>Estimated subtotal (list price × qty)</span><span class="mono">${fmt(estSubtotal)}</span></div>
-      <div class="summary-line"><span>Agent commission${commissionPct!=null?` (${(commissionPct*100).toFixed(2)}%)`:''}</span><span class="mono">${estCommission!=null?fmt(estCommission):'—'}</span></div>
-      <p class="helptext" style="margin-top:10px">Ex-factory cost and logistics aren't determined yet — those freeze once this order reaches In Transit (direct) or is Delivered (local), using dispatched quantity at that point.</p>`;
   }
 
-  box.innerHTML = `<h2>${processed?'How this profit was calculated':'Estimated figures'}</h2>
+  box.innerHTML = `<h2>${headerLabel}</h2>
     <div class="summary-line"><span>Invoice value on file</span><span class="v mono">${fmt(o.invoice_value_gbp)}</span></div>
     <div class="summary-line"><span>Commission on file</span><span class="v mono">${fmt(o.commission_value_gbp)}</span></div>
-    <h2 style="margin-top:18px">${processed?'Breakdown':'Estimate'}</h2>
-    ${breakdownHtml}
-    <p class="helptext" style="margin-top:14px">${processed
-      ? 'These are the actual frozen values the database computed — permanent, never recalculated after the fact.'
-      : 'This is a live estimate only — the real invoice, cost, and profit are computed by the database once this order is processed.'}</p>`;
+    <h2 style="margin-top:18px">Breakdown</h2>
+    ${breakdownHtml}`;
 }
 
 async function saveOrderDetail(){
@@ -909,6 +961,7 @@ async function saveOrderDetail(){
   try{
     const newStatus = document.getElementById('d-status').value;
     const updatePayload = {
+      customer_id: document.getElementById('d-customer').value,
       agent_id: document.getElementById('d-agent').value || null,
       customer_order_id: document.getElementById('d-cust-order-id').value || null,
       delivery_address: document.getElementById('d-delivery-address').value || null,
@@ -937,13 +990,14 @@ async function saveOrderDetail(){
       updatePayload.urgency_flag = document.getElementById('d-urgency').checked;
     }
 
-    const { error: orderErr } = await sb.from(table).update(updatePayload).eq('id', o.id);
-    if(orderErr) throw orderErr;
-
-
-    // items: update existing (editable fields only — never touch snapshot columns),
-    // insert new ones, delete removed ones. This preserves any frozen landed-cost
-    // snapshot on already-processed lines, since those columns are never sent here.
+    // CRITICAL ORDERING: items must be saved BEFORE the order/status update.
+    // The ex-factory freeze trigger fires the instant status becomes In
+    // Transit and reads container_items.dispatched_quantity straight from
+    // the database AT THAT MOMENT — if the order update ran first, it would
+    // freeze against whatever dispatched_quantity was already saved from
+    // BEFORE this save (0, on a brand new order), not the value just typed
+    // into this same form. Saving items first guarantees the freeze sees
+    // the real, current numbers.
     for(const it of items){
       const payload = { product_id: it.product_id, quantity: it.quantity,
         dispatched_quantity: it.dispatched_quantity||0, special_price_per_roll_gbp: it.special_price_per_roll_gbp };
@@ -959,6 +1013,9 @@ async function saveOrderDetail(){
       const { error } = await sb.from(itemsTable).delete().in('id', detailTarget._deletedItemIds);
       if(error) throw error;
     }
+
+    const { error: orderErr } = await sb.from(table).update(updatePayload).eq('id', o.id);
+    if(orderErr) throw orderErr;
 
     // re-fetch so the summary shows what the database actually computed
     const [{data: freshOrder}, {data: freshItems}] = await Promise.all([
