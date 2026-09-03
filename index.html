@@ -118,7 +118,7 @@
    access, not the key itself.
    ===================================================================== */
 const SUPABASE_URL = 'https://hemwfmxgclkoxlidqksm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlbXdmbXhnY2xrb3hsaWRxa3NtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyMzYwNDEsImV4cCI6MjEwMzgxMjA0MX0.dIFesWe0j8-RpMnQDbcuVbSHZXeeDMVJd3GQ70brfXI';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlbXdmbXhnY2xrb3hsaWRxa3NtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4ODIzNjA0MSwiZXhwIjoyMTAzODEyMDQxfQ.TIWVW45pcPyeNlKzoxWM-HWf3nONQZi7GgzRP5jirkU';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -806,6 +806,18 @@ function renderOrderDetail(){
           <div class="field"><label>Dispatch warehouse</label><div class="mono" style="padding:8px 0">${warehouseName(o.warehouse_id)}</div></div>
           <div class="field"><label>Vehicle no.</label><input type="text" id="d-vehicle-no" value="${o.vehicle_no||''}"></div>
           <div class="field" style="flex-direction:row;align-items:center;gap:8px;margin-top:16px"><input type="checkbox" id="d-urgency" ${o.urgency_flag?'checked':''} style="width:auto"><label style="margin:0">Urgent</label></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Dispatch date</label><input type="date" id="d-dispatch-date-local" value="${o.dispatch_date||''}"></div>
+          <div class="field">
+            <label>Delivery trip <span style="font-weight:400;color:var(--ink-soft)">(link several orders to the same trip to split its cost by roll count)</span></label>
+            <select id="d-delivery-trip"><option value="">— none —</option><option value="__new__">+ Create new trip…</option></select>
+          </div>
+        </div>
+        <div class="field-row" id="d-new-trip-fields" style="display:none">
+          <div class="field"><label>Trip date</label><input type="date" id="d-trip-date" value="${o.dispatch_date||todayStr()}"></div>
+          <div class="field"><label>Total delivery-partner cost for this trip (£)</label><input type="number" id="d-trip-cost" min="0" step="1" placeholder="e.g. 180"></div>
+          <div class="field"><label>Notes</label><input type="text" id="d-trip-notes" placeholder="e.g. 3 drops, Leicester round"></div>
         </div>`}
         <div class="field-row"><div class="field"><label>Remarks</label><input type="text" id="d-remarks" value="${o.remarks||''}"></div></div>
 
@@ -839,6 +851,25 @@ function renderOrderDetail(){
       detailTarget.order.source_unit_id = e.target.value || null;
       renderDetailSummary();
     });
+  } else {
+    const tripSelect = document.getElementById('d-delivery-trip');
+    const newTripFields = document.getElementById('d-new-trip-fields');
+    tripSelect.addEventListener('change', e=>{
+      newTripFields.style.display = e.target.value === '__new__' ? '' : 'none';
+    });
+    // load this warehouse's trips async, then populate — doesn't block the
+    // rest of the detail view from being usable while it loads
+    sb.from('delivery_trips').select('id,trip_date,total_delivery_partner_cost_gbp,notes')
+      .eq('warehouse_id', o.warehouse_id).order('trip_date', {ascending:false})
+      .then(({data})=>{
+        (data||[]).forEach(t=>{
+          const opt = document.createElement('option');
+          opt.value = t.id;
+          opt.textContent = `${t.trip_date} — ${fmt(t.total_delivery_partner_cost_gbp)}${t.notes?' ('+t.notes+')':''}`;
+          if(t.id === o.delivery_trip_id) opt.selected = true;
+          tripSelect.insertBefore(opt, tripSelect.querySelector('option[value="__new__"]'));
+        });
+      });
   }
   document.getElementById('detail-add-line').addEventListener('click', ()=>{
     detailTarget.items.push({product_id:PRODUCTS[0]?.id, quantity:0, dispatched_quantity:0, special_price_per_roll_gbp:null, _new:true});
@@ -880,8 +911,45 @@ function renderDetailSummary(){
   const box = document.getElementById('detail-summary');
   const { isLocal, order: o, items } = detailTarget;
   const commissionPct = o.customer_id ? CUSTOMER_COMMISSION_PCT[o.customer_id] : null;
+  const isWarehouseBound = !isLocal && !!o.destination_warehouse_id;
 
   let breakdownHtml, headerLabel;
+
+  if(isWarehouseBound){
+    // CONFIRMED FIX: a container going TO a warehouse is not a sale — it has
+    // no real customer, no real invoice, no real profit. That figure was
+    // being shown here by mistake (an accidental byproduct of the invoicing
+    // trigger not caring about destination). Profit on this stock is only
+    // ever recognized later, on whichever local delivery order eventually
+    // draws it down from the warehouse ledger. Show what's actually real
+    // here: the landed cost this container contributes to that ledger.
+    // NOTE: this is a LIVE preview using TODAY's price — the real ledger
+    // blend already happened, permanently, using the price that was true
+    // at the moment this container was actually marked Delivered. These
+    // two numbers can legitimately differ; this panel does not show or
+    // claim to show the frozen historical ledger value.
+    headerLabel = 'Landed cost contributed to warehouse ledger';
+    const hasDispatchDate = !!o.dispatch_date;
+    const exTotal = hasDispatchDate
+      ? items.reduce((s,it)=>s + (it.dispatched_quantity||0) * (exFactoryPrice(it.product_id, o.source_unit_id, o.dispatch_date) ?? 0), 0)
+      : 0;
+    const totalRolls = items.reduce((s,it)=>s+(it.dispatched_quantity||0),0);
+    const logisticsShare = totalRolls>0 ? (o.logistics_cost_gbp||0)/totalRolls : 0;
+    breakdownHtml = `
+      <table><thead><tr><th>Product</th><th class="num">Ex-factory £/roll (live)</th><th class="num">+ Logistics share</th><th class="num">= Landed £/roll</th></tr></thead>
+      <tbody>${items.map(it=>{
+        const px = hasDispatchDate ? exFactoryPrice(it.product_id, o.source_unit_id, o.dispatch_date) : null;
+        const landed = (px!=null && hasDispatchDate) ? px + logisticsShare : null;
+        return `<tr><td>${productName(it.product_id)}</td><td class="num">${px!=null?fmt(px):'—'}</td><td class="num">${fmt(logisticsShare)}</td><td class="num">${landed!=null?fmt(landed):'—'}</td></tr>`;
+      }).join('')}</tbody></table>
+      ${!hasDispatchDate ? `<p class="helptext" style="color:var(--negative)">No dispatch date set — landed cost shows £0 until one is entered.</p>` : ''}
+      <div class="summary-line"><span>Total ex-factory cost (live, as of dispatch date)</span><span class="mono">${fmt(exTotal)}</span></div>
+      <div class="summary-line"><span>+ Logistics cost</span><span class="mono">${fmt(o.logistics_cost_gbp)}</span></div>
+      <div class="summary-line total"><span>= Total landed cost this container adds</span><span class="mono">${fmt(exTotal + (o.logistics_cost_gbp||0))}</span></div>
+      <p class="helptext" style="margin-top:14px">No invoice or profit here — this container isn't a sale. Check the Warehouse ledger tab on the dashboard for the actual blended average cost, and Local delivery P&L for real profit once this stock is sold on.</p>`;
+    box.innerHTML = `<h2>${headerLabel}</h2>${breakdownHtml}`;
+    return;
+  }
 
   if(!isLocal){
     // DIRECT CONTAINERS: always live, never frozen — CONFIRMED decision.
@@ -988,6 +1056,21 @@ async function saveOrderDetail(){
     } else {
       updatePayload.vehicle_no = document.getElementById('d-vehicle-no').value || null;
       updatePayload.urgency_flag = document.getElementById('d-urgency').checked;
+      updatePayload.dispatch_date = document.getElementById('d-dispatch-date-local')?.value || null;
+
+      const tripChoice = document.getElementById('d-delivery-trip')?.value;
+      if(tripChoice === '__new__'){
+        const { data: trip, error: tripErr } = await sb.from('delivery_trips').insert({
+          warehouse_id: o.warehouse_id,
+          trip_date: document.getElementById('d-trip-date').value,
+          total_delivery_partner_cost_gbp: +(document.getElementById('d-trip-cost').value||0),
+          notes: document.getElementById('d-trip-notes').value || null,
+        }).select().single();
+        if(tripErr) throw tripErr;
+        updatePayload.delivery_trip_id = trip.id;
+      } else {
+        updatePayload.delivery_trip_id = tripChoice || null;
+      }
     }
 
     // CRITICAL ORDERING: items must be saved BEFORE the order/status update.
@@ -1040,13 +1123,15 @@ async function renderDashboard(){
   const el = document.getElementById('view-dashboard');
   el.innerHTML = `<div class="loading">Loading dashboard…</div>`;
 
-  const [pipelineRes, ledgerRes, directRes, localRes] = await Promise.all([
+  const [pipelineRes, ledgerRes, directRes, localRes, overheadRes] = await Promise.all([
     sb.from('v_order_status_pipeline').select('*'),
     sb.from('v_warehouse_ledger').select('*'),
     sb.from('v_direct_profit').select('*'),
     sb.from('v_warehouse_local_profit').select('*'),
+    sb.from('warehouse_overhead').select('id,warehouse_id,monthly_amount_gbp,effective_date').order('effective_date', {ascending:false}),
   ]);
   const pipeline = pipelineRes.data||[], ledger = ledgerRes.data||[], direct = directRes.data||[], local = localRes.data||[];
+  const overhead = overheadRes.data||[];
 
   const totalDirectProfit = direct.reduce((s,r)=>s+(r.profit_gbp||0),0);
   const totalLocalProfit = local.reduce((s,r)=>s+(r.profit_gbp||0),0);
@@ -1070,14 +1155,14 @@ async function renderDashboard(){
   el.querySelectorAll('.subtabs button').forEach(b=>b.addEventListener('click', ()=>{
     dashSubtab=b.dataset.s;
     el.querySelectorAll('.subtabs button').forEach(x=>x.classList.toggle('active', x.dataset.s===dashSubtab));
-    drawDashboardContent({pipeline,ledger,direct,local});
+    drawDashboardContent({pipeline,ledger,direct,local,overhead});
   }));
-  drawDashboardContent({pipeline,ledger,direct,local});
+  drawDashboardContent({pipeline,ledger,direct,local,overhead});
 }
 
 function drawDashboardContent(data){
   const content = document.getElementById('dash-content');
-  const { pipeline, ledger, direct, local } = data;
+  const { pipeline, ledger, direct, local, overhead } = data;
   if(dashSubtab==='pipeline'){
     const channels = [...new Set(pipeline.map(r=>r.channel))];
     content.innerHTML = `<h2>Orders by status, per channel</h2>
@@ -1088,7 +1173,29 @@ function drawDashboardContent(data){
     content.innerHTML = `<h2>Live weighted-average landed cost per (warehouse, product)</h2>
       ${ledger.length? `<table><thead><tr><th>Warehouse</th><th>Product</th><th class="num">Qty on hand</th><th class="num">Avg cost/roll</th></tr></thead>
       <tbody>${ledger.map(r=>`<tr><td>${r.warehouse_name}</td><td>${r.sku_name}</td><td class="num">${r.qty_on_hand}</td><td class="num">${fmt(r.avg_cost_gbp)}</td></tr>`).join('')}</tbody></table>`
-      : `<div class="empty">No warehouse stock movements yet.</div>`}`;
+      : `<div class="empty">No warehouse stock movements yet.</div>`}
+      <h2 style="margin-top:24px">Warehouse overhead <span style="font-weight:400;color:var(--ink-soft);font-size:12px">(rent, staff, other fixed monthly costs — spread per roll dispatched that month)</span></h2>
+      ${overhead.length? `<table><thead><tr><th>Warehouse</th><th class="num">Monthly amount</th><th>Effective from</th></tr></thead>
+      <tbody>${overhead.map(o=>`<tr><td>${warehouseName(o.warehouse_id)}</td><td class="num">${fmt(o.monthly_amount_gbp)}</td><td class="mono">${o.effective_date}</td></tr>`).join('')}</tbody></table>`
+      : `<div class="empty">No overhead rates set yet — local delivery orders will show £0 overhead until one is added below.</div>`}
+      <div class="field-row" style="margin-top:14px">
+        <div class="field"><label>Warehouse</label><select id="oh-warehouse">${optionsHtml(WAREHOUSES,w=>w.name)}</select></div>
+        <div class="field"><label>Monthly amount (£)</label><input type="number" id="oh-amount" min="0" step="1" placeholder="e.g. 4500"></div>
+        <div class="field"><label>Effective from</label><input type="date" id="oh-effective" value="${todayStr()}"></div>
+        <div class="field" style="flex:0 0 auto;justify-content:flex-end"><button class="btn small" id="oh-add" style="margin-top:16px">Add rate</button></div>
+      </div>
+      <p class="helptext">Adding a new rate doesn't overwrite the old one — it takes effect from its date onward, same as ex-factory and selling prices. Past deliveries already frozen aren't affected.</p>`;
+    document.getElementById('oh-add').addEventListener('click', async ()=>{
+      const btn = document.getElementById('oh-add');
+      btn.disabled = true;
+      const { error } = await sb.from('warehouse_overhead').insert({
+        warehouse_id: document.getElementById('oh-warehouse').value,
+        monthly_amount_gbp: +(document.getElementById('oh-amount').value||0),
+        effective_date: document.getElementById('oh-effective').value,
+      });
+      if(error){ alert('Could not add rate: '+error.message); btn.disabled=false; return; }
+      await renderDashboard();
+    });
   } else if(dashSubtab==='direct'){
     content.innerHTML = `<h2>Direct-to-customer P&amp;L</h2>
       <p class="helptext" style="margin-bottom:10px">Click any row to see exactly how its cost and profit were calculated.</p>
