@@ -29,11 +29,23 @@
   @media (max-width:920px){.grid{grid-template-columns:1fr;}}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:20px 22px;margin-bottom:18px;}
   .card h2{font-size:13px;margin:0 0 14px;font-weight:600;color:var(--ink);border-bottom:1px solid var(--line);padding-bottom:10px;}
-  .field-row{display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;}
-  .field{flex:1;min-width:160px;display:flex;flex-direction:column;gap:5px;}
+  .card h2 .subtitle{font-weight:400;color:var(--ink-soft);font-size:11.5px;text-transform:none;letter-spacing:0;margin-left:8px;}
+  .field-row{display:grid;grid-template-columns:repeat(3,1fr);gap:14px 16px;margin-bottom:14px;align-items:end;}
+  .field-row.cols-2{grid-template-columns:repeat(2,1fr);}
+  @media (max-width:640px){.field-row,.field-row.cols-2{grid-template-columns:1fr;}}
+  .field{display:flex;flex-direction:column;gap:5px;min-width:0;}
   .field label{font-size:11.5px;color:var(--ink-soft);font-weight:600;}
-  select,input{background:var(--field-bg);border:1px solid var(--line);border-radius:2px;padding:8px 9px;font-size:13.5px;color:var(--ink);font-family:'IBM Plex Sans',sans-serif;}
+  select,input{background:var(--field-bg);border:1px solid var(--line);border-radius:2px;padding:8px 9px;font-size:13.5px;color:var(--ink);font-family:'IBM Plex Sans',sans-serif;width:100%;box-sizing:border-box;}
   select:focus,input:focus{outline:2px solid var(--accent);outline-offset:0;}
+  /* searchable select — a text input + filtered dropdown panel standing in
+     for a native <select> on long lists (customers, products) */
+  .ssel{position:relative;}
+  .ssel input{cursor:text;}
+  .ssel-panel{display:none;position:absolute;top:calc(100% + 3px);left:0;right:0;z-index:50;background:var(--panel);border:1px solid var(--line);border-radius:2px;box-shadow:0 4px 14px rgba(0,0,0,.12);max-height:230px;overflow-y:auto;}
+  .ssel-panel.open{display:block;}
+  .ssel-opt{padding:8px 10px;font-size:13px;cursor:pointer;}
+  .ssel-opt:hover,.ssel-opt.hi{background:var(--field-bg);}
+  .ssel-empty{padding:8px 10px;font-size:12.5px;color:var(--ink-soft);}
   .order-type-tabs,.subtabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;}
   .order-type-tabs button{font-family:'IBM Plex Mono',monospace;font-size:12px;padding:8px 12px;border-radius:2px;border:1px solid var(--line);background:var(--field-bg);color:var(--ink-soft);cursor:pointer;}
   .order-type-tabs button.active{background:var(--accent);border-color:var(--accent);color:#fff;}
@@ -117,8 +129,8 @@
    client-side — RLS (enable_auth_rls.sql) is what actually restricts
    access, not the key itself.
    ===================================================================== */
-const SUPABASE_URL = 'https://hemwfmxgclkoxlidqksm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlbXdmbXhnY2xrb3hsaWRxa3NtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4ODIzNjA0MSwiZXhwIjoyMTAzODEyMDQxfQ.TIWVW45pcPyeNlKzoxWM-HWf3nONQZi7GgzRP5jirkU';
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -240,6 +252,62 @@ function exFactoryPrice(productId, unitId, asOf){
 function optionsHtml(list, labelFn, selected){
   return list.map(x=>`<option value="${x.id}" ${x.id===selected?'selected':''}>${labelFn(x)}</option>`).join('');
 }
+// Searchable select — stands in for a native <select> on long lists
+// (customers, products). Renders a visible text input for searching plus a
+// HIDDEN input carrying the real id under the ORIGINAL field id, so every
+// existing document.getElementById(id).value read elsewhere keeps working
+// unchanged. Call renderSearchableSelect() in the template, then
+// wireSearchableSelect() right after inserting that HTML into the DOM.
+function renderSearchableSelect(id, list, labelFn, selected, placeholder){
+  const selectedItem = selected ? list.find(x=>x.id===selected) : null;
+  const label = selectedItem ? labelFn(selectedItem) : '';
+  return `<div class="ssel">
+    <input type="text" id="${id}-search" value="${label}" placeholder="${placeholder||'Type to search…'}" autocomplete="off">
+    <input type="hidden" id="${id}" value="${selected||''}">
+    <div class="ssel-panel" id="${id}-panel"></div>
+  </div>`;
+}
+function wireSearchableSelect(id, list, labelFn, onChange){
+  const searchInput = document.getElementById(id+'-search');
+  const hiddenInput = document.getElementById(id);
+  const panel = document.getElementById(id+'-panel');
+  if(!searchInput || !panel) return;
+  let hiIdx = -1;
+
+  function renderPanel(filterText){
+    const term = (filterText||'').toLowerCase();
+    const filtered = list.filter(x=>labelFn(x).toLowerCase().includes(term));
+    panel.innerHTML = filtered.length
+      ? filtered.slice(0,50).map((x,i)=>`<div class="ssel-opt" data-idx="${i}" data-value="${x.id}">${labelFn(x)}</div>`).join('')
+      : `<div class="ssel-empty">No matches</div>`;
+    panel.classList.add('open');
+    hiIdx = -1;
+    panel.querySelectorAll('.ssel-opt').forEach(el=>el.addEventListener('mousedown', e=>{
+      e.preventDefault(); // fires before blur, so the click registers before the panel closes
+      selectOption(el.dataset.value, el.textContent);
+    }));
+  }
+  function selectOption(value, label){
+    hiddenInput.value = value;
+    searchInput.value = label;
+    panel.classList.remove('open');
+    if(onChange) onChange(value);
+  }
+  function updateHi(opts){
+    opts.forEach((o,i)=>o.classList.toggle('hi', i===hiIdx));
+    if(opts[hiIdx]) opts[hiIdx].scrollIntoView({block:'nearest'});
+  }
+  searchInput.addEventListener('focus', ()=>renderPanel(''));
+  searchInput.addEventListener('input', ()=>renderPanel(searchInput.value));
+  searchInput.addEventListener('blur', ()=>{ setTimeout(()=>panel.classList.remove('open'), 150); });
+  searchInput.addEventListener('keydown', e=>{
+    const opts = [...panel.querySelectorAll('.ssel-opt')];
+    if(e.key==='ArrowDown'){ e.preventDefault(); hiIdx=Math.min(hiIdx+1,opts.length-1); updateHi(opts); }
+    else if(e.key==='ArrowUp'){ e.preventDefault(); hiIdx=Math.max(hiIdx-1,0); updateHi(opts); }
+    else if(e.key==='Enter'){ e.preventDefault(); if(opts[hiIdx]) selectOption(opts[hiIdx].dataset.value, opts[hiIdx].textContent); }
+    else if(e.key==='Escape'){ panel.classList.remove('open'); }
+  });
+}
 
 /* =====================================================================
    NAV
@@ -295,10 +363,10 @@ function renderOrderForm(today){
     <h2>${ {direct:'Direct container', warehouse_bound:'Container to warehouse', local:'Local delivery order', transfer:'Inter-warehouse transfer'}[currentOrderType] }</h2>
     <div class="field-row">
       ${!isTransfer ? `<div class="field"><label>${isLocal? 'Warehouse (dispatching)':'Customer'}</label>
-        <select id="f-primary">${isLocal ? optionsHtml(WAREHOUSES,w=>w.name) : optionsHtml(customerOptions,c=>c.name)}</select></div>`
+        ${isLocal ? `<select id="f-primary">${optionsHtml(WAREHOUSES,w=>w.name)}</select>` : renderSearchableSelect('f-primary', customerOptions, c=>c.name, null, 'Search customers…')}</div>`
       : `<div class="field"><label>From warehouse</label><select id="f-from">${optionsHtml(WAREHOUSES,w=>w.name)}</select></div>
          <div class="field"><label>To warehouse</label><select id="f-to">${optionsHtml(WAREHOUSES,w=>w.name)}</select></div>`}
-      ${isLocal ? `<div class="field"><label>Customer</label><select id="f-customer">${optionsHtml(customerOptions,c=>c.name)}</select></div>`:''}
+      ${isLocal ? `<div class="field"><label>Customer</label>${renderSearchableSelect('f-customer', customerOptions, c=>c.name, null, 'Search customers…')}</div>`:''}
       <div class="field"><label>Order date</label><input type="date" id="f-order-date" value="${today}"></div>
     </div>
     ${!isTransfer ? `<div class="field-row">
@@ -358,11 +426,7 @@ function renderOrderForm(today){
   // this order type: f-primary for direct/warehouse-bound, f-customer for local.
   if(!isTransfer){
     const custSelectId = isLocal ? 'f-customer' : 'f-primary';
-    const custSelect = document.getElementById(custSelectId);
-    if(custSelect){
-      custSelect.addEventListener('change', ()=>onOrderCustomerChanged(custSelect.value));
-      if(custSelect.value) onOrderCustomerChanged(custSelect.value);
-    }
+    wireSearchableSelect(custSelectId, customerOptions, c=>c.name, (val)=>onOrderCustomerChanged(val));
     document.getElementById('f-address-picker').addEventListener('change', e=>{
       document.getElementById('f-delivery-address').value = e.target.value;
       updateOrderSummary();
@@ -417,16 +481,21 @@ function renderLineItems(){
     const price = (!isTransfer && custId) ? sellingPrice(it.product_id, custId, 'standard', orderDate) : null;
     return `
     <tr>
-      <td><select data-idx="${idx}" data-f="product_id">${optionsHtml(PRODUCTS,p=>p.sku_name,it.product_id)}</select></td>
+      <td>${renderSearchableSelect('line-item-product-'+idx, PRODUCTS, p=>p.sku_name, it.product_id, 'Search products…')}</td>
       <td><input type="number" min="1" data-idx="${idx}" data-f="quantity" value="${it.quantity}" style="width:80px"></td>
       ${!isTransfer ? `<td class="mono num" style="padding-top:12px">${price!=null?fmt(price):'—'}</td>` : ''}
       ${!isTransfer && !isWarehouseBound ? `<td><input type="number" min="0" step="0.01" data-idx="${idx}" data-f="special_price" value="${it.special_price}" placeholder="optional" style="width:110px"></td>` : ''}
       <td>${draftItems.length>1?`<button class="btn small secondary" data-remove="${idx}">×</button>`:''}</td>
     </tr>`;
   }).join('');
+  draftItems.forEach((it,idx)=>{
+    wireSearchableSelect('line-item-product-'+idx, PRODUCTS, p=>p.sku_name, (val)=>{
+      draftItems[idx].product_id = val;
+      updateOrderSummary();
+    });
+  });
   body.querySelectorAll('[data-f]').forEach(inp=>inp.addEventListener('input', e=>{
     draftItems[+e.target.dataset.idx][e.target.dataset.f] = e.target.value;
-    if(e.target.dataset.f==='product_id') renderLineItems();
     updateOrderSummary();
   }));
   body.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click', e=>{
@@ -767,49 +836,50 @@ function renderOrderDetail(){
       </div>
     </div>
     <div class="grid">
-      <div><div class="card">
-        <h2>Order details</h2>
+      <div>
+      <div class="card">
+        <h2>Order details <span class="subtitle">customer &amp; basics</span></h2>
         <div class="field-row">
-          <div class="field"><label>Customer</label><select id="d-customer">${optionsHtml(
+          <div class="field"><label>Customer</label>${renderSearchableSelect('d-customer',
             isLocal ? CUSTOMERS.filter(c=>!c.is_warehouse_destination)
                     : CUSTOMERS.filter(c=> !!c.is_warehouse_destination === !!o.destination_warehouse_id),
-            c=>c.name, o.customer_id)}</select></div>
+            c=>c.name, o.customer_id, 'Search customers…')}</div>
           <div class="field"><label>Order ID</label><div class="mono" style="padding:8px 0">${referenceLabel}</div></div>
           <div class="field"><label>Order date</label><input type="date" id="d-order-date" value="${o.order_date||''}"></div>
         </div>
         <div class="field-row">
           <div class="field"><label>Customer order ID</label><input type="text" id="d-cust-order-id" value="${o.customer_order_id||''}"></div>
           <div class="field"><label>Delivery address</label><input type="text" id="d-delivery-address" value="${o.delivery_address||''}"></div>
-        </div>
-        <div class="field-row">
           <div class="field"><label>Customer requested date</label><input type="date" id="d-requested-date" value="${o.customer_requested_date||''}"></div>
-          <div class="field"><label>Expected delivery date</label><input type="date" id="d-expected-date" value="${o.expected_delivery_date||''}"></div>
         </div>
         <div class="field-row">
           <div class="field"><label>Agent</label><select id="d-agent"><option value="">— none —</option>${optionsHtml(AGENTS,a=>a.name,o.agent_id)}</select></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Logistics &amp; fulfilment <span class="subtitle">handled by the ops/logistics team</span></h2>
+        <div class="field-row">
           <div class="field"><label>Order status</label><select id="d-status">${ALL_STATUSES.map(s=>`<option value="${s}" ${s===o.status?'selected':''}>${s}</option>`).join('')}</select></div>
-          <div class="field"><label>Discount (£)</label><input type="number" id="d-discount" value="${o.total_discount_gbp||0}" min="0" step="1"></div>
+          <div class="field"><label>Expected delivery date</label><input type="date" id="d-expected-date" value="${o.expected_delivery_date||''}"></div>
+          <div class="field"><label>Dispatch warehouse ${!isLocal && !o.destination_warehouse_id?'(direct — none)':''}</label><div class="mono" style="padding:8px 0">${isLocal ? warehouseName(o.warehouse_id) : (o.destination_warehouse_id?warehouseName(o.destination_warehouse_id):'—')}</div></div>
         </div>
         ${!isLocal ? `<div class="field-row">
-          <div class="field"><label>Dispatch warehouse ${o.destination_warehouse_id?'':'(direct — none)'}</label><div class="mono" style="padding:8px 0">${o.destination_warehouse_id?warehouseName(o.destination_warehouse_id):'—'}</div></div>
-          <div class="field"><label>Logistics cost (£)</label><input type="number" id="d-logistics" value="${o.logistics_cost_gbp||0}" min="0" step="1"></div>
-        </div>
-        <div class="field-row">
           <div class="field"><label>Source plant</label><select id="d-source-unit"><option value="">— not recorded —</option>${optionsHtml(PRODUCTION_UNITS,u=>u.name,o.source_unit_id)}</select></div>
           <div class="field"><label>Expected stuffing date</label><input type="date" id="d-stuffing-date" value="${o.expected_stuffing_date||''}"></div>
           <div class="field"><label>Vessel date</label><input type="date" id="d-vessel-date" value="${o.vessel_date||''}"></div>
         </div>
         <div class="field-row">
-          <div class="field"><label>Container no. <span style="font-weight:400;color:var(--ink-soft)">(the real shipping container — fill in once it's actually stuffed/dispatched)</span></label><input type="text" id="d-container-no" value="${o.container_no||''}" placeholder="e.g. MSCU1234567"></div>
-          <div class="field"><label>Dispatch date <span style="font-weight:400;color:var(--ink-soft)">(the date used to look up ex-factory price)</span></label><input type="date" id="d-dispatch-date" value="${o.dispatch_date||''}"></div>
+          <div class="field"><label>Container no. <span style="font-weight:400;color:var(--ink-soft)">(real shipping container — fill in once stuffed/dispatched)</span></label><input type="text" id="d-container-no" value="${o.container_no||''}" placeholder="e.g. MSCU1234567"></div>
+          <div class="field"><label>Dispatch date <span style="font-weight:400;color:var(--ink-soft)">(used to look up ex-factory price)</span></label><input type="date" id="d-dispatch-date" value="${o.dispatch_date||''}"></div>
+          <div class="field"><label>Logistics cost (£)</label><input type="number" id="d-logistics" value="${o.logistics_cost_gbp||0}" min="0" step="1"></div>
         </div>
         ${!o.source_unit_id ? `<div class="warn-box">No source plant recorded — ex-factory price lookup falls back to any unit's most recent price.</div>` : ''}` : `<div class="field-row">
-          <div class="field"><label>Dispatch warehouse</label><div class="mono" style="padding:8px 0">${warehouseName(o.warehouse_id)}</div></div>
           <div class="field"><label>Vehicle no.</label><input type="text" id="d-vehicle-no" value="${o.vehicle_no||''}"></div>
-          <div class="field" style="flex-direction:row;align-items:center;gap:8px;margin-top:16px"><input type="checkbox" id="d-urgency" ${o.urgency_flag?'checked':''} style="width:auto"><label style="margin:0">Urgent</label></div>
-        </div>
-        <div class="field-row">
           <div class="field"><label>Dispatch date</label><input type="date" id="d-dispatch-date-local" value="${o.dispatch_date||''}"></div>
+          <div class="field" style="flex-direction:row;align-items:center;gap:8px;padding-bottom:8px"><input type="checkbox" id="d-urgency" ${o.urgency_flag?'checked':''} style="width:auto"><label style="margin:0">Urgent</label></div>
+        </div>
+        <div class="field-row cols-2">
           <div class="field">
             <label>Delivery trip <span style="font-weight:400;color:var(--ink-soft)">(link several orders to the same trip to split its cost by roll count)</span></label>
             <select id="d-delivery-trip"><option value="">— none —</option><option value="__new__">+ Create new trip…</option></select>
@@ -820,29 +890,39 @@ function renderOrderDetail(){
           <div class="field"><label>Total delivery-partner cost for this trip (£)</label><input type="number" id="d-trip-cost" min="0" step="1" placeholder="e.g. 180"></div>
           <div class="field"><label>Notes</label><input type="text" id="d-trip-notes" placeholder="e.g. 3 drops, Leicester round"></div>
         </div>`}
-        <div class="field-row"><div class="field"><label>Remarks</label><input type="text" id="d-remarks" value="${o.remarks||''}"></div></div>
+      </div>
 
-        ${wasProcessed ? `<p class="helptext">This order's cost/ledger figures are already computed and frozen. Editing quantities here won't recompute them.</p>`
-          : `<p class="helptext">Dispatched quantity can differ from ordered. Saving with status Delivered / Paid uses whatever is entered here.</p>`}
-        <h2 style="margin-top:18px">Related Order Items</h2>
-        <table><thead><tr><th>Product</th><th class="num">Quantity</th><th class="num">Dispatched</th><th class="num">Selling price</th><th class="num">Special price</th><th></th></tr></thead>
+      <div class="card">
+        <h2>Related Order Items</h2>
+        <table><thead><tr><th style="width:38%">Product</th><th class="num">Quantity</th><th class="num">Dispatched</th><th class="num">Selling price</th><th class="num">Special price</th><th></th></tr></thead>
           <tbody id="detail-items-body"></tbody></table>
         <button class="add-line" id="detail-add-line" style="margin-top:8px">+ Add line item</button>
-      </div></div>
+        ${wasProcessed ? `<p class="helptext" style="margin-top:12px">This order's cost/ledger figures are already computed and frozen. Editing quantities here won't recompute them.</p>`
+          : `<p class="helptext" style="margin-top:12px">Dispatched quantity can differ from ordered. Saving with status Delivered / Paid uses whatever is entered here.</p>`}
+      </div>
+
+      <div class="card">
+        <h2>Discount &amp; remarks</h2>
+        <div class="field-row cols-2">
+          <div class="field"><label>Discount (£)</label><input type="number" id="d-discount" value="${o.total_discount_gbp||0}" min="0" step="1"></div>
+          <div class="field"><label>Remarks</label><input type="text" id="d-remarks" value="${o.remarks||''}"></div>
+        </div>
+      </div>
+      </div>
       <div><div class="card" id="detail-summary"></div></div>
-    </div>
-  `;
+    </div>`;
+
+  wireSearchableSelect('d-customer',
+    isLocal ? CUSTOMERS.filter(c=>!c.is_warehouse_destination)
+            : CUSTOMERS.filter(c=> !!c.is_warehouse_destination === !!o.destination_warehouse_id),
+    c=>c.name,
+    (val)=>{ detailTarget.order.customer_id = val; renderDetailItems(); renderDetailSummary(); });
 
   renderDetailItems();
   renderDetailSummary();
 
   document.getElementById('detail-back').addEventListener('click', closeOrderDetail);
   document.getElementById('detail-save').addEventListener('click', saveOrderDetail);
-  document.getElementById('d-customer').addEventListener('change', e=>{
-    detailTarget.order.customer_id = e.target.value;
-    renderDetailItems();
-    renderDetailSummary();
-  });
   if(!isLocal){
     document.getElementById('d-dispatch-date').addEventListener('input', e=>{
       detailTarget.order.dispatch_date = e.target.value || null;
@@ -885,7 +965,7 @@ function renderDetailItems(){
     const price = o.customer_id ? sellingPrice(it.product_id, o.customer_id, isLocal?(it.transaction_type||'standard'):'standard', o.order_date) : null;
     return `
     <tr>
-      <td><select data-idx="${idx}" data-f="product_id">${optionsHtml(PRODUCTS,p=>p.sku_name,it.product_id)}</select></td>
+      <td>${renderSearchableSelect('detail-item-product-'+idx, PRODUCTS, p=>p.sku_name, it.product_id, 'Search products…')}</td>
       <td><input type="number" min="0" data-idx="${idx}" data-f="quantity" value="${it.quantity}" style="width:80px;text-align:right"></td>
       <td><input type="number" min="0" data-idx="${idx}" data-f="dispatched_quantity" value="${it.dispatched_quantity||0}" style="width:80px;text-align:right"></td>
       <td class="mono num">${price!=null?fmt(price):'—'}</td>
@@ -893,10 +973,15 @@ function renderDetailItems(){
       <td>${items.length>1?`<button class="btn small secondary" data-remove="${idx}">×</button>`:''}</td>
     </tr>`;
   }).join('');
+  items.forEach((it,idx)=>{
+    wireSearchableSelect('detail-item-product-'+idx, PRODUCTS, p=>p.sku_name, (val)=>{
+      detailTarget.items[idx].product_id = val;
+      renderDetailSummary();
+    });
+  });
   body.querySelectorAll('[data-f]').forEach(inp=>inp.addEventListener('input', e=>{
     const idx=+e.target.dataset.idx, f=e.target.dataset.f;
-    detailTarget.items[idx][f] = f==='product_id' ? e.target.value : (e.target.value===''?null:+e.target.value);
-    if(f==='product_id') renderDetailItems();
+    detailTarget.items[idx][f] = e.target.value===''?null:+e.target.value;
     renderDetailSummary();
   }));
   body.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click', e=>{
