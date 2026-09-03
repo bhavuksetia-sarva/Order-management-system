@@ -126,6 +126,7 @@ const ALL_STATUSES = ['Pending','In Production','Goods Ready','In Transit','Deli
 const DELIVERED_OR_LATER = ['Delivered','Paid'];
 
 function fmt(n){ if(n===null||n===undefined||isNaN(n)) return '—'; return '£'+Number(n).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function round2(n){ return Math.round((n+Number.EPSILON)*100)/100; }
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 
 /* =====================================================================
@@ -907,7 +908,7 @@ function renderDetailItems(){
   }));
 }
 
-function renderDetailSummary(){
+async function renderDetailSummary(){
   const box = document.getElementById('detail-summary');
   const { isLocal, order: o, items } = detailTarget;
   const commissionPct = o.customer_id ? CUSTOMER_COMMISSION_PCT[o.customer_id] : null;
@@ -979,27 +980,41 @@ function renderDetailSummary(){
       <div class="summary-line total ${profit>=0?'pos':'neg'}"><span>= Profit</span><span class="mono">${fmt(profit)}</span></div>
       <p class="helptext" style="margin-top:14px">Ex-factory cost is computed live from the dispatch date shown above — not frozen. It will change automatically if dispatch date, source plant, dispatched quantity, or the underlying price data changes.</p>`;
   } else {
-    // LOCAL DELIVERY: unchanged — landed cost still freezes once, at Delivered,
-    // via the warehouse ledger (a different mechanism, not touched by this change)
+    // LOCAL DELIVERY: the £/roll RATE (landed_cost_snapshot_gbp) and
+    // overhead stay frozen — real economic facts. The TOTAL and the trip
+    // delivery-cost SHARE are computed live here (CONFIRMED decision):
+    // the total must track dispatched_quantity if corrected later, and the
+    // trip share must recalculate if another order joins the same trip.
     const processed = items.some(it=>it.snapshot_written_at);
-    headerLabel = processed ? 'How this profit was calculated' : 'Estimated figures';
+    headerLabel = processed ? 'How this profit is calculated (partly live)' : 'Estimated figures';
     if(processed){
-      const landed = items.reduce((s,it)=>s+(it.landed_cost_total_gbp||0),0);
+      const totalOrderQty = items.reduce((s,it)=>s+(it.dispatched_quantity||0),0);
+      let tripDeliveryTotal = 0;
+      try{
+        const { data } = await sb.rpc('fn_delivery_cost_for_order', { p_warehouse_order_id: o.id });
+        tripDeliveryTotal = data || 0;
+      }catch(e){ tripDeliveryTotal = 0; }
+      const itemsWithLive = items.map(it=>({
+        ...it,
+        landedTotalLive: round2((it.landed_cost_snapshot_gbp||0) * (it.dispatched_quantity||0)),
+        deliveryShareLive: totalOrderQty>0 ? round2(tripDeliveryTotal * (it.dispatched_quantity||0) / totalOrderQty) : 0,
+      }));
+      const landed = itemsWithLive.reduce((s,it)=>s+it.landedTotalLive,0);
       const overhead = items.reduce((s,it)=>s+(it.overhead_snapshot_gbp||0),0);
-      const delivery = items.reduce((s,it)=>s+(it.delivery_cost_snapshot_gbp||0),0);
+      const delivery = itemsWithLive.reduce((s,it)=>s+it.deliveryShareLive,0);
       const totalCost = landed + overhead + delivery;
       breakdownHtml = `
-        <table><thead><tr><th>Product</th><th class="num">Landed</th><th class="num">Overhead</th><th class="num">Delivery</th></tr></thead>
-        <tbody>${items.map(it=>`<tr><td>${productName(it.product_id)}</td><td class="num">${fmt(it.landed_cost_total_gbp)}</td><td class="num">${fmt(it.overhead_snapshot_gbp)}</td><td class="num">${fmt(it.delivery_cost_snapshot_gbp)}</td></tr>`).join('')}</tbody></table>
-        <div class="summary-line"><span>Landed cost (ex-factory + container logistics share)</span><span class="mono">${fmt(landed)}</span></div>
+        <table><thead><tr><th>Product</th><th class="num">Landed (rate frozen, total live)</th><th class="num">Overhead</th><th class="num">Delivery (live)</th></tr></thead>
+        <tbody>${itemsWithLive.map(it=>`<tr><td>${productName(it.product_id)}</td><td class="num">${fmt(it.landedTotalLive)}</td><td class="num">${fmt(it.overhead_snapshot_gbp)}</td><td class="num">${fmt(it.deliveryShareLive)}</td></tr>`).join('')}</tbody></table>
+        <div class="summary-line"><span>Landed cost (£/roll frozen at delivery × current dispatched qty)</span><span class="mono">${fmt(landed)}</span></div>
         <div class="summary-line"><span>+ Warehouse overhead</span><span class="mono">${fmt(overhead)}</span></div>
-        <div class="summary-line"><span>+ Local delivery cost</span><span class="mono">${fmt(delivery)}</span></div>
+        <div class="summary-line"><span>+ Local delivery cost (this order's live share of its trip)</span><span class="mono">${fmt(delivery)}</span></div>
         <div class="summary-line total"><span>= Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
         <div class="summary-line" style="margin-top:10px"><span>Invoice value (incl. VAT, after discount)</span><span class="mono">${fmt(o.invoice_value_gbp)}</span></div>
         <div class="summary-line"><span>− Commission${commissionPct!=null?` (${(commissionPct*100).toFixed(2)}%)`:''}</span><span class="mono">${fmt(o.commission_value_gbp)}</span></div>
         <div class="summary-line total"><span>− Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
         <div class="summary-line total ${((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)>=0?'pos':'neg'}"><span>= Profit</span><span class="mono">${fmt((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)}</span></div>
-        <p class="helptext" style="margin-top:14px">These are the actual frozen values the database computed — permanent, never recalculated after the fact.</p>`;
+        <p class="helptext" style="margin-top:14px">The £/roll landed cost and overhead are frozen at the moment this order was delivered. The total and the delivery-trip share recompute live — edit dispatched quantity, or link another order to the same trip, and these numbers update automatically next time you open this order.</p>`;
     } else {
       let estSubtotal = 0;
       items.forEach(it=>{
