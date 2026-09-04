@@ -129,8 +129,8 @@
    client-side — RLS (enable_auth_rls.sql) is what actually restricts
    access, not the key itself.
    ===================================================================== */
-const SUPABASE_URL = 'https://hemwfmxgclkoxlidqksm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlbXdmbXhnY2xrb3hsaWRxa3NtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4ODIzNjA0MSwiZXhwIjoyMTAzODEyMDQxfQ.TIWVW45pcPyeNlKzoxWM-HWf3nONQZi7GgzRP5jirkU';
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -862,6 +862,9 @@ function renderOrderDetail(){
         <div class="field-row">
           <div class="field"><label>Order status</label><select id="d-status">${ALL_STATUSES.map(s=>`<option value="${s}" ${s===o.status?'selected':''}>${s}</option>`).join('')}</select></div>
           <div class="field"><label>Expected delivery date</label><input type="date" id="d-expected-date" value="${o.expected_delivery_date||''}"></div>
+          <div class="field"><label>Delivered date</label><input type="date" id="d-delivered-date" value="${o.delivered_date||''}"></div>
+        </div>
+        <div class="field-row">
           <div class="field"><label>Dispatch warehouse ${!isLocal && !o.destination_warehouse_id?'(direct — none)':''}</label><div class="mono" style="padding:8px 0">${isLocal ? warehouseName(o.warehouse_id) : (o.destination_warehouse_id?warehouseName(o.destination_warehouse_id):'—')}</div></div>
         </div>
         ${!isLocal ? `<div class="field-row">
@@ -1047,7 +1050,8 @@ async function renderDetailSummary(){
       ? items.reduce((s,it)=>s + (it.dispatched_quantity||0) * (exFactoryPrice(it.product_id, o.source_unit_id, o.dispatch_date) ?? 0), 0)
       : 0;
     const totalCost = exTotal + (o.logistics_cost_gbp||0);
-    const profit = (o.invoice_value_gbp||0) - (o.commission_value_gbp||0) - totalCost;
+    const invoiceExVat = round2((o.invoice_value_gbp||0) / 1.20);
+    const profit = invoiceExVat - (o.commission_value_gbp||0) - totalCost;
     breakdownHtml = `
       <table><thead><tr><th>Product</th><th class="num">Ex-factory £/roll</th><th class="num">Ex-factory cost</th></tr></thead>
       <tbody>${items.map(it=>{
@@ -1060,9 +1064,11 @@ async function renderDetailSummary(){
       <div class="summary-line"><span>+ Logistics cost</span><span class="mono">${fmt(o.logistics_cost_gbp)}</span></div>
       <div class="summary-line total"><span>= Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
       <div class="summary-line" style="margin-top:10px"><span>Invoice value (incl. VAT, after discount)</span><span class="mono">${fmt(o.invoice_value_gbp)}</span></div>
+      <div class="summary-line"><span>Invoice value (ex. VAT — used for profit)</span><span class="mono">${fmt(invoiceExVat)}</span></div>
       <div class="summary-line"><span>− Commission${commissionPct!=null?` (${(commissionPct*100).toFixed(2)}%)`:''}</span><span class="mono">${fmt(o.commission_value_gbp)}</span></div>
       <div class="summary-line total"><span>− Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
       <div class="summary-line total ${profit>=0?'pos':'neg'}"><span>= Profit</span><span class="mono">${fmt(profit)}</span></div>
+      <p class="helptext" style="margin-top:8px">Profit is calculated on the VAT-exclusive invoice amount — the 20% VAT portion isn't real revenue, it's owed to HMRC.</p>
       <p class="helptext" style="margin-top:14px">Ex-factory cost is computed live from the dispatch date shown above — not frozen. It will change automatically if dispatch date, source plant, dispatched quantity, or the underlying price data changes.</p>`;
   } else {
     // LOCAL DELIVERY: the £/roll RATE (landed_cost_snapshot_gbp) and
@@ -1088,6 +1094,8 @@ async function renderDetailSummary(){
       const overhead = items.reduce((s,it)=>s+(it.overhead_snapshot_gbp||0),0);
       const delivery = itemsWithLive.reduce((s,it)=>s+it.deliveryShareLive,0);
       const totalCost = landed + overhead + delivery;
+      const invoiceExVat = round2((o.invoice_value_gbp||0) / 1.20);
+      const profit = invoiceExVat - (o.commission_value_gbp||0) - totalCost;
       breakdownHtml = `
         <table><thead><tr><th>Product</th><th class="num">Landed (rate frozen, total live)</th><th class="num">Overhead</th><th class="num">Delivery (live)</th></tr></thead>
         <tbody>${itemsWithLive.map(it=>`<tr><td>${productName(it.product_id)}</td><td class="num">${fmt(it.landedTotalLive)}</td><td class="num">${fmt(it.overhead_snapshot_gbp)}</td><td class="num">${fmt(it.deliveryShareLive)}</td></tr>`).join('')}</tbody></table>
@@ -1096,10 +1104,12 @@ async function renderDetailSummary(){
         <div class="summary-line"><span>+ Local delivery cost (this order's live share of its trip)</span><span class="mono">${fmt(delivery)}</span></div>
         <div class="summary-line total"><span>= Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
         <div class="summary-line" style="margin-top:10px"><span>Invoice value (incl. VAT, after discount)</span><span class="mono">${fmt(o.invoice_value_gbp)}</span></div>
+        <div class="summary-line"><span>Invoice value (ex. VAT — used for profit)</span><span class="mono">${fmt(invoiceExVat)}</span></div>
         <div class="summary-line"><span>− Commission${commissionPct!=null?` (${(commissionPct*100).toFixed(2)}%)`:''}</span><span class="mono">${fmt(o.commission_value_gbp)}</span></div>
         <div class="summary-line total"><span>− Total cost</span><span class="mono">${fmt(totalCost)}</span></div>
-        <div class="summary-line total ${((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)>=0?'pos':'neg'}"><span>= Profit</span><span class="mono">${fmt((o.invoice_value_gbp||0)-(o.commission_value_gbp||0)-totalCost)}</span></div>
-        <p class="helptext" style="margin-top:14px">The £/roll landed cost and overhead are frozen at the moment this order was delivered. The total and the delivery-trip share recompute live — edit dispatched quantity, or link another order to the same trip, and these numbers update automatically next time you open this order.</p>`;
+        <div class="summary-line total ${profit>=0?'pos':'neg'}"><span>= Profit</span><span class="mono">${fmt(profit)}</span></div>
+        <p class="helptext" style="margin-top:8px">Profit is calculated on the VAT-exclusive invoice amount — the 20% VAT portion isn't real revenue, it's owed to HMRC.</p>
+        <p class="helptext" style="margin-top:8px">The £/roll landed cost and overhead are frozen at the moment this order was delivered. The total and the delivery-trip share recompute live — edit dispatched quantity, or link another order to the same trip, and these numbers update automatically next time you open this order.</p>`;
     } else {
       let estSubtotal = 0;
       items.forEach(it=>{
@@ -1145,7 +1155,9 @@ async function saveOrderDetail(){
       const manualDispatchDate = document.getElementById('d-dispatch-date')?.value || null;
       updatePayload.dispatch_date = manualDispatchDate || (newStatus === 'In Transit' && !o.dispatch_date ? today : o.dispatch_date || null);
     }
-    if(DELIVERED_OR_LATER.includes(newStatus) && !o.delivered_date) updatePayload.delivered_date = today;
+    const manualDeliveredDate = document.getElementById('d-delivered-date')?.value || null;
+    updatePayload.delivered_date = manualDeliveredDate
+      || (DELIVERED_OR_LATER.includes(newStatus) && !o.delivered_date ? today : o.delivered_date || null);
     if(newStatus === 'Paid' && !o.paid_date) updatePayload.paid_date = today;
     if(!isLocal){
       updatePayload.logistics_cost_gbp = +(document.getElementById('d-logistics')?.value||0);
