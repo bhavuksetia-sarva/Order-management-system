@@ -659,12 +659,13 @@ let obFiltersOpen=false;
 let cachedOrderRows = [];
 
 async function fetchOrderBookRows(){
-  const [containersRes, whOrdersRes, transfersRes, cItemsRes, woItemsRes] = await Promise.all([
+  const [containersRes, whOrdersRes, transfersRes, cItemsRes, woItemsRes, twItemsRes] = await Promise.all([
     sb.from('containers').select('id,order_no,container_no,order_date,delivery_address,customer_requested_date,expected_delivery_date,delivered_date,invoice_no,remarks,agent_id,status,invoice_value_gbp,destination_warehouse_id,customer_id'),
     sb.from('warehouse_orders').select('id,order_no,order_date,delivery_address,customer_requested_date,expected_delivery_date,delivered_date,invoice_no,remarks,agent_id,status,invoice_value_gbp,warehouse_id,customer_id'),
-    sb.from('warehouse_transfers').select('id,reference_no,transfer_date,from_warehouse_id,to_warehouse_id'),
+    sb.from('warehouse_transfers').select('id,transfer_no,reference_no,transfer_date,from_warehouse_id,to_warehouse_id,processed'),
     sb.from('container_items').select('container_id,product_id,quantity'),
     sb.from('warehouse_order_items').select('warehouse_order_id,product_id,quantity'),
+    sb.from('warehouse_transfer_items').select('transfer_id,product_id,quantity'),
   ]);
 
   // group items by order id, building the same "consolidated" comma-joined
@@ -676,6 +677,9 @@ async function fetchOrderBookRows(){
   });
   (woItemsRes.data||[]).forEach(it=>{
     (itemsByOrder[it.warehouse_order_id] = itemsByOrder[it.warehouse_order_id] || []).push(it);
+  });
+  (twItemsRes.data||[]).forEach(it=>{
+    (itemsByOrder[it.transfer_id] = itemsByOrder[it.transfer_id] || []).push(it);
   });
   function consolidated(orderId){
     const its = itemsByOrder[orderId] || [];
@@ -716,13 +720,16 @@ async function fetchOrderBookRows(){
       products: cons.products, qtys: cons.qtys,
     });
   });
-  (transfersRes.data||[]).forEach(t=>rows.push({
-    typeKey:'transfer', type:'Transfer', id:t.reference_no||t.id, refId:t.id, isLocal:null,
-    customerName:'', who: warehouseName(t.from_warehouse_id)+' → '+warehouseName(t.to_warehouse_id),
-    agentName:'', date:t.transfer_date, status:'Processed', value:null,
-    deliveryAddress:'', customerRequestedDate:'', expectedDeliveryDate:'', deliveredDate:'',
-    invoiceNo:'', remarks:'', products:'', qtys:'',
-  }));
+  (transfersRes.data||[]).forEach(t=>{
+    const cons = consolidated(t.id);
+    rows.push({
+      typeKey:'transfer', type:'Transfer', id:t.transfer_no||t.reference_no||t.id, refId:t.id, isLocal:null,
+      customerName:'', who: warehouseName(t.from_warehouse_id)+' → '+warehouseName(t.to_warehouse_id),
+      agentName:'', date:t.transfer_date, status: t.processed ? 'Delivered' : 'Pending', value:null,
+      deliveryAddress:'', customerRequestedDate:'', expectedDeliveryDate:'', deliveredDate:'',
+      invoiceNo:'', remarks: t.reference_no||'', products: cons.products, qtys: cons.qtys,
+    });
+  });
   return rows.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
 }
 
@@ -791,7 +798,7 @@ function drawOrderList(){
       <td class="mono">${r.qtys||'—'}</td>
       <td class="mono">${r.date||''}</td>
       <td class="mono">${r.customerRequestedDate||'—'}</td>
-      <td><span class="badge ${DELIVERED_OR_LATER.includes(r.status)||r.status==='Processed'?'delivered':''}">${r.status}</span></td>
+      <td><span class="badge ${DELIVERED_OR_LATER.includes(r.status)?'delivered':''}">${r.status}</span></td>
       <td style="max-width:200px">${r.remarks||'—'}</td></tr>`).join('')}</tbody></table>`
     : `<div class="empty">No orders match${obSearchTerm||activeFilterCount?' your search/filters':' this status'}.</div>`}
   </div>`;
@@ -812,7 +819,7 @@ function drawOrderList(){
   }
   el.querySelectorAll('.order-row').forEach(tr=>tr.addEventListener('click', ()=>{
     const r = visibleRows[+tr.dataset.idx];
-    if(r.typeKey==='transfer') return; // transfers process instantly, nothing to open
+    if(r.typeKey==='transfer'){ openTransferDetail(r.refId); return; }
     openOrderDetail(r.typeKey, r.isLocal, r.refId);
   }));
 }
@@ -849,6 +856,125 @@ function closeOrderDetail(){
   document.getElementById('view-orderlist').style.display='block';
   document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('active', x.dataset.view==='orderlist'));
   drawOrderList();
+}
+
+/* =====================================================================
+   TRANSFER DETAIL — simpler than order detail: no customer/agent/pricing.
+   The frozen cost RATE never changes after the fact (only set once, on
+   insert) — quantity stays editable, and the displayed TOTAL is computed
+   live from rate × current quantity, same pattern as the local delivery
+   landed-cost fix.
+   ===================================================================== */
+let transferTarget = null;
+
+async function openTransferDetail(id){
+  ['order','orderlist','dashboard'].forEach(v=>document.getElementById('view-'+v).style.display='none');
+  const el = document.getElementById('view-orderdetail');
+  el.style.display='block';
+  el.innerHTML = `<div class="card"><div class="loading">Loading transfer…</div></div>`;
+  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
+
+  const [{data: transfer, error: e1}, {data: items, error: e2}] = await Promise.all([
+    sb.from('warehouse_transfers').select('*').eq('id', id).single(),
+    sb.from('warehouse_transfer_items').select('*').eq('transfer_id', id),
+  ]);
+  if(e1 || e2){ el.innerHTML = `<div class="card"><div class="warn-box">Error loading transfer: ${(e1||e2).message}</div></div>`; return; }
+
+  transferTarget = { transfer, items: items||[] };
+  renderTransferDetail();
+}
+
+function renderTransferDetail(){
+  const el = document.getElementById('view-orderdetail');
+  const { transfer: t, items } = transferTarget;
+  const totalValue = items.reduce((s,it)=>s+((it.transfer_cost_per_roll_gbp||0)*(it.quantity||0)),0);
+
+  el.innerHTML = `
+    <div class="card" style="display:flex;align-items:center;justify-content:space-between">
+      <div><span class="helptext">Order Book</span> <span class="helptext">›</span> <strong>${t.transfer_no||t.reference_no||t.id}</strong></div>
+      <div style="display:flex;gap:10px">
+        <button class="btn secondary" id="transfer-back">← Back</button>
+        <button class="btn" id="transfer-save">Save changes</button>
+      </div>
+    </div>
+    <div class="grid">
+      <div>
+      <div class="card">
+        <h2>Transfer details</h2>
+        <div class="field-row">
+          <div class="field"><label>Transfer no.</label><div class="mono" style="padding:8px 0">${t.transfer_no||'—'}</div></div>
+          <div class="field"><label>Reference</label><input type="text" id="t-reference" value="${t.reference_no||''}"></div>
+          <div class="field"><label>Transfer date</label><input type="date" id="t-date" value="${t.transfer_date||''}"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>From warehouse</label><select id="t-from">${optionsHtml(WAREHOUSES,w=>w.name,t.from_warehouse_id)}</select></div>
+          <div class="field"><label>To warehouse</label><select id="t-to">${optionsHtml(WAREHOUSES,w=>w.name,t.to_warehouse_id)}</select></div>
+          <div class="field" style="flex-direction:row;align-items:center;gap:8px;padding-bottom:8px"><input type="checkbox" id="t-processed" ${t.processed?'checked':''} style="width:auto"><label style="margin:0">Processed</label></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Products transferred</h2>
+        <table><thead><tr><th>Product</th><th class="num">Quantity</th><th class="num">£/roll (frozen at transfer)</th><th class="num">Total (live)</th><th></th></tr></thead>
+        <tbody>${items.map((it,idx)=>`<tr>
+          <td>${productName(it.product_id)}</td>
+          <td><input type="number" min="1" data-idx="${idx}" style="width:80px;text-align:right" value="${it.quantity}"></td>
+          <td class="mono num">${fmt(it.transfer_cost_per_roll_gbp)}</td>
+          <td class="mono num" id="t-line-total-${idx}">${fmt((it.transfer_cost_per_roll_gbp||0)*(it.quantity||0))}</td>
+          <td><button class="btn small secondary" data-remove="${idx}">×</button></td>
+        </tr>`).join('')}</tbody></table>
+        <p class="helptext" style="margin-top:12px">The £/roll rate freezes the moment a product is added to a transfer and never changes after — it reflects the source warehouse's real cost at that exact moment. The total updates live if you edit quantity.</p>
+      </div>
+      </div>
+      <div><div class="card">
+        <h2>Transfer value</h2>
+        <div class="summary-line total"><span>Total transferred value</span><span class="mono" id="t-grand-total">${fmt(totalValue)}</span></div>
+      </div></div>
+    </div>`;
+
+  document.getElementById('transfer-back').addEventListener('click', closeOrderDetail);
+  document.getElementById('transfer-save').addEventListener('click', saveTransferDetail);
+  el.querySelectorAll('input[data-idx]').forEach(inp=>inp.addEventListener('input', e=>{
+    const idx = +e.target.dataset.idx;
+    transferTarget.items[idx].quantity = +e.target.value || 0;
+    const lineTotal = (transferTarget.items[idx].transfer_cost_per_roll_gbp||0) * transferTarget.items[idx].quantity;
+    document.getElementById('t-line-total-'+idx).textContent = fmt(lineTotal);
+    document.getElementById('t-grand-total').textContent = fmt(transferTarget.items.reduce((s,it)=>s+((it.transfer_cost_per_roll_gbp||0)*(it.quantity||0)),0));
+  }));
+  el.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click', e=>{
+    const idx = +e.target.dataset.remove;
+    const removed = transferTarget.items.splice(idx,1)[0];
+    if(removed.id) transferTarget._deletedItemIds = [...(transferTarget._deletedItemIds||[]), removed.id];
+    renderTransferDetail();
+  }));
+}
+
+async function saveTransferDetail(){
+  const { transfer: t, items, _deletedItemIds } = transferTarget;
+  const saveBtn = document.getElementById('transfer-save');
+  saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+  try {
+    const { error: tErr } = await sb.from('warehouse_transfers').update({
+      reference_no: document.getElementById('t-reference').value || null,
+      transfer_date: document.getElementById('t-date').value,
+      from_warehouse_id: document.getElementById('t-from').value,
+      to_warehouse_id: document.getElementById('t-to').value,
+      processed: document.getElementById('t-processed').checked,
+    }).eq('id', t.id);
+    if(tErr) throw tErr;
+
+    for(const it of items){
+      const { error } = await sb.from('warehouse_transfer_items').update({ quantity: it.quantity }).eq('id', it.id);
+      if(error) throw error;
+    }
+    if(_deletedItemIds && _deletedItemIds.length){
+      const { error } = await sb.from('warehouse_transfer_items').delete().in('id', _deletedItemIds);
+      if(error) throw error;
+    }
+    closeOrderDetail();
+  } catch(e){
+    alert('Could not save: ' + e.message);
+    saveBtn.disabled = false; saveBtn.textContent = 'Save changes';
+  }
 }
 
 function renderOrderDetail(){
