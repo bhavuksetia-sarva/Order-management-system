@@ -139,8 +139,8 @@
    client-side — RLS (enable_auth_rls.sql) is what actually restricts
    access, not the key itself.
    ===================================================================== */
-const SUPABASE_URL = 'https://hemwfmxgclkoxlidqksm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlbXdmbXhnY2xrb3hsaWRxa3NtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyMzYwNDEsImV4cCI6MjEwMzgxMjA0MX0.dIFesWe0j8-RpMnQDbcuVbSHZXeeDMVJd3GQ70brfXI';
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -884,6 +884,7 @@ function renderOrderDetail(){
         </div>
         <div class="field-row">
           <div class="field"><label>Agent</label><select id="d-agent" ${CURRENT_AGENT?'disabled':''}><option value="">— none —</option>${optionsHtml(AGENTS,a=>a.name,o.agent_id)}</select></div>
+          <div class="field"><label>Source order ID <span style="font-weight:400;color:var(--ink-soft)">(from the original migrated sheet, if any)</span></label><div class="mono" style="padding:8px 0">${o.source_row_id || '— placed directly in this system —'}</div></div>
         </div>
       </div>
 
