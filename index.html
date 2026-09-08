@@ -16,15 +16,25 @@
   *{box-sizing:border-box;}
   body{margin:0;background:var(--bg);color:var(--ink);font-family:'IBM Plex Sans',sans-serif;font-size:14px;line-height:1.5;}
   .mono{font-family:'IBM Plex Mono',monospace;}
-  header{background:var(--ink);color:#fff;padding:18px 28px;display:flex;align-items:center;justify-content:space-between;gap:14px;}
+  header{background:var(--ink);color:#fff;padding:18px 28px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;}
   header .left{display:flex;align-items:baseline;gap:14px;}
   header .wordmark{font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:15px;letter-spacing:.02em;}
   header .sub{color:#9FB0AC;font-size:12.5px;}
   header .right{display:flex;align-items:center;gap:14px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#9FB0AC;}
-  nav{display:flex;gap:2px;background:var(--panel);border-bottom:1px solid var(--line);padding:0 24px;}
-  nav button{border:none;background:none;padding:14px 18px;font-size:13.5px;font-weight:600;color:var(--ink-soft);cursor:pointer;border-bottom:2px solid transparent;font-family:'IBM Plex Sans',sans-serif;}
+  nav{display:flex;gap:2px;background:var(--panel);border-bottom:1px solid var(--line);padding:0 24px;overflow-x:auto;-webkit-overflow-scrolling:touch;}
+  nav button{border:none;background:none;padding:14px 18px;font-size:13.5px;font-weight:600;color:var(--ink-soft);cursor:pointer;border-bottom:2px solid transparent;font-family:'IBM Plex Sans',sans-serif;white-space:nowrap;flex:0 0 auto;}
   nav button.active{color:var(--accent-ink);border-bottom-color:var(--accent);}
   main{max-width:1180px;margin:0 auto;padding:26px 24px 60px;}
+  @media (max-width:640px){
+    header{padding:14px 16px;}
+    main{padding:16px 12px 40px;}
+    .card{padding:16px 14px;}
+    .order-type-tabs,.subtabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;padding-bottom:4px;}
+    .order-type-tabs button,.subtabs button{flex:0 0 auto;}
+    /* wide tables scroll within their own card instead of breaking the page layout */
+    .card table{display:block;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch;}
+    .kpi-row{grid-template-columns:1fr 1fr;}
+  }
   .grid{display:grid;grid-template-columns:1.55fr 1fr;gap:20px;align-items:start;}
   @media (max-width:920px){.grid{grid-template-columns:1fr;}}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:20px 22px;margin-bottom:18px;}
@@ -130,12 +140,16 @@
    access, not the key itself.
    ===================================================================== */
 const SUPABASE_URL = 'https://hemwfmxgclkoxlidqksm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlbXdmbXhnY2xrb3hsaWRxa3NtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4ODIzNjA0MSwiZXhwIjoyMTAzODEyMDQxfQ.TIWVW45pcPyeNlKzoxWM-HWf3nONQZi7GgzRP5jirkU';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlbXdmbXhnY2xrb3hsaWRxa3NtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyMzYwNDEsImV4cCI6MjEwMzgxMjA0MX0.dIFesWe0j8-RpMnQDbcuVbSHZXeeDMVJd3GQ70brfXI';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const ALL_STATUSES = ['Pending','In Production','Goods Ready','In Transit','Delivered','Paid','Cancelled'];
 const DELIVERED_OR_LATER = ['Delivered','Paid'];
+// Real values from the warehouse's actual Product Price List — local
+// delivery pricing depends on drop size, not just product+customer.
+// Casing matters: these are matched exactly against selling_prices.transaction_type.
+const TRANSACTION_TYPES = ['full container load', 'B/W 100 - full container', '< 100 roll drop'];
 
 function fmt(n){ if(n===null||n===undefined||isNaN(n)) return '—'; return '£'+Number(n).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}); }
 function round2(n){ return Math.round((n+Number.EPSILON)*100)/100; }
@@ -152,11 +166,21 @@ function showLogin(){
   document.getElementById('login-screen').style.display = 'flex';
   document.getElementById('app-shell').style.display = 'none';
 }
+let CURRENT_AGENT = null; // {id, name} if this login is linked to an agent, else null (ops/logistics)
+
 async function showApp(session){
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app-shell').style.display = 'block';
   document.getElementById('user-email').textContent = session.user.email;
   await loadReferenceData();
+
+  const { data: agentMatch } = await sb.from('agents').select('id,name').eq('auth_user_id', session.user.id).maybeSingle();
+  CURRENT_AGENT = agentMatch || null;
+  if(CURRENT_AGENT){
+    // agents don't see company-wide cost/profit data — that's an ops concern
+    document.querySelector('nav button[data-view="dashboard"]').style.display = 'none';
+    document.getElementById('user-email').textContent += ` (${CURRENT_AGENT.name})`;
+  }
   renderOrderView();
 }
 document.getElementById('login-btn').addEventListener('click', async ()=>{
@@ -385,7 +409,7 @@ function renderOrderForm(today){
       <div class="field"><label>Vessel date</label><input type="date" id="f-vessel-date"></div>
     </div>` : ''}
     ${!isTransfer ? `<div class="field-row">
-      <div class="field"><label>Agent</label><select id="f-agent"><option value="">— none —</option>${optionsHtml(AGENTS,a=>a.name)}</select></div>
+      <div class="field"><label>Agent</label><select id="f-agent" ${CURRENT_AGENT?'disabled':''}><option value="">— none —</option>${optionsHtml(AGENTS,a=>a.name, CURRENT_AGENT?CURRENT_AGENT.id:undefined)}</select></div>
       ${!isLocal ? `<div class="field"><label>Logistics cost (£, whole container)</label><input type="number" id="f-logistics" value="0" min="0" step="1"></div>` :
         `<div class="field"><label>Vehicle no.</label><input type="text" id="f-vehicle-no"></div>
          <div class="field" style="flex-direction:row;align-items:center;gap:8px;margin-top:16px"><input type="checkbox" id="f-urgency" style="width:auto"><label style="margin:0">Urgent</label></div>`}
@@ -398,6 +422,7 @@ function renderOrderForm(today){
 
     <h2 style="margin-top:18px">Line items</h2>
     <table><thead><tr><th>Product</th><th style="width:90px">Qty (rolls)</th>
+      ${isLocal ? '<th style="width:170px">Transaction type</th>' : ''}
       ${!isTransfer? '<th class="num" style="width:110px">Selling price</th>':''}
       ${!isTransfer && !isWarehouseBound? '<th style="width:130px">Special price /roll</th>':''}<th style="width:40px"></th></tr></thead>
       <tbody id="line-items-body"></tbody></table>
@@ -453,7 +478,7 @@ function onOrderCustomerChanged(customerId){
     addrInput.value = '';
   }
 
-  if(agentSelect){
+  if(agentSelect && !CURRENT_AGENT){
     const agentId = CUSTOMER_DEFAULT_AGENT[customerId];
     agentSelect.value = agentId || '';
   }
@@ -475,14 +500,17 @@ function renderLineItems(){
   const body = document.getElementById('line-items-body');
   const isTransfer = currentOrderType==='transfer';
   const isWarehouseBound = currentOrderType==='warehouse_bound';
+  const isLocal = currentOrderType==='local';
   const custId = currentFormCustomerId();
   const orderDate = currentFormOrderDate();
   body.innerHTML = draftItems.map((it,idx)=>{
-    const price = (!isTransfer && custId) ? sellingPrice(it.product_id, custId, 'standard', orderDate) : null;
+    const txnType = isLocal ? (it.transaction_type || TRANSACTION_TYPES[0]) : 'standard';
+    const price = (!isTransfer && custId) ? sellingPrice(it.product_id, custId, txnType, orderDate) : null;
     return `
     <tr>
       <td>${renderSearchableSelect('line-item-product-'+idx, PRODUCTS, p=>p.sku_name, it.product_id, 'Search products…')}</td>
       <td><input type="number" min="1" data-idx="${idx}" data-f="quantity" value="${it.quantity}" style="width:80px"></td>
+      ${isLocal ? `<td><select data-idx="${idx}" data-f="transaction_type" style="min-width:170px">${TRANSACTION_TYPES.map(t=>`<option ${t===txnType?'selected':''}>${t}</option>`).join('')}</select></td>` : ''}
       ${!isTransfer ? `<td class="mono num" style="padding-top:12px">${price!=null?fmt(price):'—'}</td>` : ''}
       ${!isTransfer && !isWarehouseBound ? `<td><input type="number" min="0" step="0.01" data-idx="${idx}" data-f="special_price" value="${it.special_price}" placeholder="optional" style="width:110px"></td>` : ''}
       <td>${draftItems.length>1?`<button class="btn small secondary" data-remove="${idx}">×</button>`:''}</td>
@@ -512,7 +540,8 @@ function updateOrderSummary(){
   const orderDate = currentFormOrderDate();
   let estimatedSubtotal = 0, anyMissingPrice = false;
   const rows = items.map(r=>{
-    const price = custId ? sellingPrice(r.product_id, custId, 'standard', orderDate) : null;
+    const txnType = currentOrderType==='local' ? (r.transaction_type || TRANSACTION_TYPES[0]) : 'standard';
+    const price = custId ? sellingPrice(r.product_id, custId, txnType, orderDate) : null;
     if(price==null) anyMissingPrice = true;
     const lineTotal = price!=null ? price * +r.quantity : null;
     if(lineTotal!=null) estimatedSubtotal += lineTotal;
@@ -602,6 +631,7 @@ async function submitOrder(){
     const itemRows = items.map(i=>({
       [itemFk]: orderId, product_id: i.product_id, quantity: +i.quantity,
       special_price_per_roll_gbp: i.special_price ? +i.special_price : null,
+      ...(isLocal ? { transaction_type: i.transaction_type || TRANSACTION_TYPES[0] } : {}),
     }));
     const { error: itemsErr } = await sb.from(itemsTable).insert(itemRows);
     if(itemsErr) throw itemsErr;
@@ -853,7 +883,7 @@ function renderOrderDetail(){
           <div class="field"><label>Customer requested date</label><input type="date" id="d-requested-date" value="${o.customer_requested_date||''}"></div>
         </div>
         <div class="field-row">
-          <div class="field"><label>Agent</label><select id="d-agent"><option value="">— none —</option>${optionsHtml(AGENTS,a=>a.name,o.agent_id)}</select></div>
+          <div class="field"><label>Agent</label><select id="d-agent" ${CURRENT_AGENT?'disabled':''}><option value="">— none —</option>${optionsHtml(AGENTS,a=>a.name,o.agent_id)}</select></div>
         </div>
       </div>
 
@@ -897,7 +927,7 @@ function renderOrderDetail(){
 
       <div class="card">
         <h2>Related Order Items</h2>
-        <table><thead><tr><th style="width:38%">Product</th><th class="num">Quantity</th><th class="num">Dispatched</th><th class="num">Selling price</th><th class="num">Special price</th><th></th></tr></thead>
+        <table><thead><tr><th style="width:38%">Product</th><th class="num">Quantity</th><th class="num">Dispatched</th>${isLocal?'<th style="width:170px">Transaction type</th>':''}<th class="num">Selling price</th><th class="num">Special price</th><th></th></tr></thead>
           <tbody id="detail-items-body"></tbody></table>
         <button class="add-line" id="detail-add-line" style="margin-top:8px">+ Add line item</button>
         ${wasProcessed ? `<p class="helptext" style="margin-top:12px">This order's cost/ledger figures are already computed and frozen. Editing quantities here won't recompute them.</p>`
@@ -965,12 +995,14 @@ function renderDetailItems(){
   const body = document.getElementById('detail-items-body');
   const { items, order: o, isLocal } = detailTarget;
   body.innerHTML = items.map((it,idx)=>{
-    const price = o.customer_id ? sellingPrice(it.product_id, o.customer_id, isLocal?(it.transaction_type||'standard'):'standard', o.order_date) : null;
+    const txnType = isLocal ? (it.transaction_type || TRANSACTION_TYPES[0]) : 'standard';
+    const price = o.customer_id ? sellingPrice(it.product_id, o.customer_id, txnType, o.order_date) : null;
     return `
     <tr>
       <td>${renderSearchableSelect('detail-item-product-'+idx, PRODUCTS, p=>p.sku_name, it.product_id, 'Search products…')}</td>
       <td><input type="number" min="0" data-idx="${idx}" data-f="quantity" value="${it.quantity}" style="width:80px;text-align:right"></td>
       <td><input type="number" min="0" data-idx="${idx}" data-f="dispatched_quantity" value="${it.dispatched_quantity||0}" style="width:80px;text-align:right"></td>
+      ${isLocal ? `<td><select data-idx="${idx}" data-f="transaction_type" style="min-width:170px">${TRANSACTION_TYPES.map(t=>`<option ${t===txnType?'selected':''}>${t}</option>`).join('')}</select></td>` : ''}
       <td class="mono num">${price!=null?fmt(price):'—'}</td>
       <td><input type="number" min="0" step="0.01" data-idx="${idx}" data-f="special_price_per_roll_gbp" value="${it.special_price_per_roll_gbp||''}" style="width:90px;text-align:right" placeholder="optional"></td>
       <td>${items.length>1?`<button class="btn small secondary" data-remove="${idx}">×</button>`:''}</td>
@@ -984,7 +1016,8 @@ function renderDetailItems(){
   });
   body.querySelectorAll('[data-f]').forEach(inp=>inp.addEventListener('input', e=>{
     const idx=+e.target.dataset.idx, f=e.target.dataset.f;
-    detailTarget.items[idx][f] = e.target.value===''?null:+e.target.value;
+    detailTarget.items[idx][f] = (f==='transaction_type') ? e.target.value
+      : (e.target.value===''?null:+e.target.value);
     renderDetailSummary();
   }));
   body.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click', e=>{
@@ -1001,6 +1034,17 @@ async function renderDetailSummary(){
   const { isLocal, order: o, items } = detailTarget;
   const commissionPct = o.customer_id ? CUSTOMER_COMMISSION_PCT[o.customer_id] : null;
   const isWarehouseBound = !isLocal && !!o.destination_warehouse_id;
+
+  if(CURRENT_AGENT){
+    // Agents see their own invoice/commission, not company cost/margin data —
+    // that's an ops/finance concern, not something a sales agent needs or
+    // should see about every order.
+    box.innerHTML = `<h2>Order value</h2>
+      <div class="summary-line"><span>Invoice value (incl. VAT, after discount)</span><span class="v mono">${fmt(o.invoice_value_gbp)}</span></div>
+      <div class="summary-line"><span>Your commission${commissionPct!=null?` (${(commissionPct*100).toFixed(2)}%)`:''}</span><span class="v mono">${fmt(o.commission_value_gbp)}</span></div>
+      <p class="helptext" style="margin-top:14px">Cost and profit details are managed by the ops team.</p>`;
+    return;
+  }
 
   let breakdownHtml, headerLabel;
 
@@ -1195,7 +1239,8 @@ async function saveOrderDetail(){
     // the real, current numbers.
     for(const it of items){
       const payload = { product_id: it.product_id, quantity: it.quantity,
-        dispatched_quantity: it.dispatched_quantity||0, special_price_per_roll_gbp: it.special_price_per_roll_gbp };
+        dispatched_quantity: it.dispatched_quantity||0, special_price_per_roll_gbp: it.special_price_per_roll_gbp,
+        ...(isLocal ? { transaction_type: it.transaction_type || TRANSACTION_TYPES[0] } : {}) };
       if(it.id){
         const { error } = await sb.from(itemsTable).update(payload).eq('id', it.id);
         if(error) throw error;
