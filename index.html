@@ -678,9 +678,9 @@ let cachedOrderRows = [];
 
 async function fetchOrderBookRows(){
   const [containersRes, whOrdersRes, transfersRes, cItemsRes, woItemsRes, twItemsRes] = await Promise.all([
-    sb.from('containers').select('id,order_no,container_no,order_date,delivery_address,customer_requested_date,expected_delivery_date,delivered_date,invoice_no,remarks,agent_id,status,invoice_value_gbp,destination_warehouse_id,customer_id'),
-    sb.from('warehouse_orders').select('id,order_no,order_date,delivery_address,customer_requested_date,expected_delivery_date,delivered_date,invoice_no,remarks,agent_id,status,invoice_value_gbp,warehouse_id,customer_id'),
-    sb.from('warehouse_transfers').select('id,transfer_no,reference_no,transfer_date,from_warehouse_id,to_warehouse_id,processed'),
+    sb.from('containers').select('id,order_no,source_row_id,container_no,order_date,delivery_address,customer_requested_date,expected_delivery_date,delivered_date,invoice_no,remarks,agent_id,status,invoice_value_gbp,destination_warehouse_id,customer_id'),
+    sb.from('warehouse_orders').select('id,order_no,source_row_id,order_date,delivery_address,customer_requested_date,expected_delivery_date,delivered_date,invoice_no,remarks,agent_id,status,invoice_value_gbp,warehouse_id,customer_id'),
+    sb.from('warehouse_transfers').select('id,transfer_no,source_row_id,reference_no,transfer_date,from_warehouse_id,to_warehouse_id,processed'),
     sb.from('container_items').select('container_id,product_id,quantity'),
     sb.from('warehouse_order_items').select('warehouse_order_id,product_id,quantity'),
     sb.from('warehouse_transfer_items').select('transfer_id,product_id,quantity'),
@@ -713,7 +713,7 @@ async function fetchOrderBookRows(){
     rows.push({
       typeKey: c.destination_warehouse_id?'warehouse_bound':'direct',
       type: c.destination_warehouse_id?'Container → warehouse':'Direct container',
-      id: c.order_no, refId: c.id, isLocal:false,
+      id: c.order_no, refId: c.id, isLocal:false, sourceRowId: c.source_row_id,
       customerName: c.destination_warehouse_id?warehouseName(c.destination_warehouse_id):customerName(c.customer_id),
       who: c.destination_warehouse_id?warehouseName(c.destination_warehouse_id):customerName(c.customer_id),
       agentName: agentName(c.agent_id),
@@ -727,7 +727,7 @@ async function fetchOrderBookRows(){
   (whOrdersRes.data||[]).forEach(o=>{
     const cons = consolidated(o.id);
     rows.push({
-      typeKey:'local', type:'Local delivery', id:o.order_no, refId:o.id, isLocal:true,
+      typeKey:'local', type:'Local delivery', id:o.order_no, refId:o.id, isLocal:true, sourceRowId: o.source_row_id,
       customerName: customerName(o.customer_id),
       who: customerName(o.customer_id)+' ← '+warehouseName(o.warehouse_id),
       agentName: agentName(o.agent_id),
@@ -741,7 +741,7 @@ async function fetchOrderBookRows(){
   (transfersRes.data||[]).forEach(t=>{
     const cons = consolidated(t.id);
     rows.push({
-      typeKey:'transfer', type:'Transfer', id:t.transfer_no||t.reference_no||t.id, refId:t.id, isLocal:null,
+      typeKey:'transfer', type:'Transfer', id:t.transfer_no||t.reference_no||t.id, refId:t.id, isLocal:null, sourceRowId: t.source_row_id,
       customerName:'', who: warehouseName(t.from_warehouse_id)+' → '+warehouseName(t.to_warehouse_id),
       agentName:'', date:t.transfer_date, status: t.processed ? 'Delivered' : 'Pending', value:null,
       deliveryAddress:'', customerRequestedDate:'', expectedDeliveryDate:'', deliveredDate:'',
@@ -808,9 +808,10 @@ function drawOrderList(){
       const n = s==='All'?typeRows.length:typeRows.filter(r=>r.status===s).length;
       return `<button data-s="${s}" class="${obStatusTab===s?'active':''}">${s} (${n})</button>`;
     }).join('')}</div>` : ''}
-    ${visibleRows.length? `<table><thead><tr><th>Reference</th><th>${obTypeTab==='transfer'?'Route':'Customer'}</th>
+    ${visibleRows.length? `<table><thead><tr><th>Reference</th><th>Source ID</th><th>${obTypeTab==='transfer'?'Route':'Customer'}</th>
       <th>Products</th><th>Qty</th><th>Order date</th><th>Requested date</th><th>Status</th><th>Remarks</th></tr></thead>
     <tbody>${visibleRows.map((r,i)=>`<tr class="order-row" data-idx="${i}"><td class="mono"><span style="color:var(--accent-ink);text-decoration:underline">${r.id}</span></td>
+      <td class="mono" style="color:var(--ink-soft)">${r.sourceRowId||'—'}</td>
       <td>${r.who}</td>
       <td style="max-width:220px">${r.products||'—'}</td>
       <td class="mono">${r.qtys||'—'}</td>
@@ -912,6 +913,7 @@ function renderTransferDetail(){
       <div><span class="helptext">Order Book</span> <span class="helptext">›</span> <strong>${t.transfer_no||t.reference_no||t.id}</strong></div>
       <div style="display:flex;gap:10px">
         <button class="btn secondary" id="transfer-back">← Back</button>
+        <button class="btn" id="transfer-delete" style="background:#fff;border:1px solid var(--negative);color:var(--negative)">Delete transfer</button>
         <button class="btn" id="transfer-save">Save changes</button>
       </div>
     </div>
@@ -951,6 +953,7 @@ function renderTransferDetail(){
 
   document.getElementById('transfer-back').addEventListener('click', closeOrderDetail);
   document.getElementById('transfer-save').addEventListener('click', saveTransferDetail);
+  document.getElementById('transfer-delete').addEventListener('click', deleteTransfer);
   el.querySelectorAll('input[data-idx]').forEach(inp=>inp.addEventListener('input', e=>{
     const idx = +e.target.dataset.idx;
     transferTarget.items[idx].quantity = +e.target.value || 0;
@@ -995,6 +998,24 @@ async function saveTransferDetail(){
   }
 }
 
+async function deleteTransfer(){
+  const { transfer: t } = transferTarget;
+  const label = t.transfer_no || t.reference_no || t.id;
+  if(!confirm(`Delete transfer ${label}? This removes it and its line items permanently — this cannot be undone.`)) return;
+  const btn = document.getElementById('transfer-delete');
+  btn.disabled = true; btn.textContent = 'Deleting…';
+  try{
+    const { error: itemsErr } = await sb.from('warehouse_transfer_items').delete().eq('transfer_id', t.id);
+    if(itemsErr) throw itemsErr;
+    const { error: transferErr } = await sb.from('warehouse_transfers').delete().eq('id', t.id);
+    if(transferErr) throw transferErr;
+    closeOrderDetail();
+  } catch(e){
+    alert('Could not delete: ' + e.message);
+    btn.disabled = false; btn.textContent = 'Delete transfer';
+  }
+}
+
 function renderOrderDetail(){
   const el = document.getElementById('view-orderdetail');
   const { isLocal, order: o, items } = detailTarget;
@@ -1006,6 +1027,7 @@ function renderOrderDetail(){
       <div><span class="helptext">Order Book</span> <span class="helptext">›</span> <strong>${referenceLabel}</strong></div>
       <div style="display:flex;gap:10px">
         <button class="btn secondary" id="detail-back">← Back</button>
+        ${!CURRENT_AGENT ? `<button class="btn" id="detail-delete" style="background:#fff;border:1px solid var(--negative);color:var(--negative)">Delete order</button>` : ''}
         <button class="btn" id="detail-save">Save changes</button>
       </div>
     </div>
@@ -1101,6 +1123,7 @@ function renderOrderDetail(){
 
   document.getElementById('detail-back').addEventListener('click', closeOrderDetail);
   document.getElementById('detail-save').addEventListener('click', saveOrderDetail);
+  if(!CURRENT_AGENT) document.getElementById('detail-delete').addEventListener('click', deleteOrder);
   if(!isLocal){
     document.getElementById('d-dispatch-date').addEventListener('input', e=>{
       detailTarget.order.dispatch_date = e.target.value || null;
@@ -1413,6 +1436,24 @@ async function saveOrderDetail(){
     alert('Save failed: ' + (err.message||err));
   }finally{
     saveBtn.disabled = false; saveBtn.textContent = 'Save changes';
+  }
+}
+
+async function deleteOrder(){
+  const { table, itemsTable, itemFk, order: o } = detailTarget;
+  const label = o.order_no || o.id;
+  if(!confirm(`Delete order ${label}? This removes it and its line items permanently, including any frozen cost/invoice history — this cannot be undone.`)) return;
+  const btn = document.getElementById('detail-delete');
+  btn.disabled = true; btn.textContent = 'Deleting…';
+  try{
+    const { error: itemsErr } = await sb.from(itemsTable).delete().eq(itemFk, o.id);
+    if(itemsErr) throw itemsErr;
+    const { error: orderErr } = await sb.from(table).delete().eq('id', o.id);
+    if(orderErr) throw orderErr;
+    closeOrderDetail();
+  } catch(e){
+    alert('Could not delete: ' + e.message);
+    btn.disabled = false; btn.textContent = 'Delete order';
   }
 }
 
