@@ -903,10 +903,21 @@ async function openTransferDetail(id){
   renderTransferDetail();
 }
 
-function renderTransferDetail(){
+async function renderTransferDetail(){
   const el = document.getElementById('view-orderdetail');
   const { transfer: t, items } = transferTarget;
-  const totalValue = items.reduce((s,it)=>s+((it.transfer_cost_per_roll_gbp||0)*(it.quantity||0)),0);
+  const warehouseCostTotal = items.reduce((s,it)=>s+((it.transfer_cost_per_roll_gbp||0)*(it.quantity||0)),0);
+  const totalRolls = items.reduce((s,it)=>s+(it.quantity||0),0);
+
+  let tripCostPerRoll = 0;
+  if(t.delivery_trip_id){
+    try{
+      const { data } = await sb.rpc('fn_transfer_trip_cost_per_roll', { p_transfer_id: t.id });
+      tripCostPerRoll = data || 0;
+    }catch(e){ tripCostPerRoll = 0; }
+  }
+  const tripCostTotal = round2(tripCostPerRoll * totalRolls);
+  const grandTotal = warehouseCostTotal + tripCostTotal;
 
   el.innerHTML = `
     <div class="card" style="display:flex;align-items:center;justify-content:space-between">
@@ -931,6 +942,18 @@ function renderTransferDetail(){
           <div class="field"><label>To warehouse</label><select id="t-to">${optionsHtml(WAREHOUSES,w=>w.name,t.to_warehouse_id)}</select></div>
           <div class="field" style="flex-direction:row;align-items:center;gap:8px;padding-bottom:8px"><input type="checkbox" id="t-processed" ${t.processed?'checked':''} style="width:auto"><label style="margin:0">Processed</label></div>
         </div>
+        <div class="field-row cols-2">
+          <div class="field">
+            <label>Delivery trip <span style="font-weight:400;color:var(--ink-soft)">(link if this transfer rode along with local deliveries on the same run)</span></label>
+            <select id="t-delivery-trip"><option value="">— none —</option><option value="__new__">+ Create new trip…</option></select>
+          </div>
+        </div>
+        <div class="field-row" id="t-new-trip-fields" style="display:none">
+          <div class="field"><label>Trip date</label><input type="date" id="t-trip-date" value="${t.transfer_date||todayStr()}"></div>
+          <div class="field"><label>Total delivery-partner cost for this trip (£)</label><input type="number" id="t-trip-cost" min="0" step="1" placeholder="e.g. 180"></div>
+          <div class="field"><label>This transfer's own cost within it (£)</label><input type="number" id="t-trip-transfer-leg" min="0" step="1" placeholder="e.g. 50"></div>
+          <div class="field"><label>Notes</label><input type="text" id="t-trip-notes" placeholder="e.g. 3 drops, Leicester round"></div>
+        </div>
       </div>
       <div class="card">
         <h2>Products transferred</h2>
@@ -943,11 +966,14 @@ function renderTransferDetail(){
           <td><button class="btn small secondary" data-remove="${idx}">×</button></td>
         </tr>`).join('')}</tbody></table>
         <p class="helptext" style="margin-top:12px">The £/roll rate freezes the moment a product is added to a transfer and never changes after — it reflects the source warehouse's real cost at that exact moment. The total updates live if you edit quantity.</p>
+        ${t.delivery_trip_id ? `<p class="helptext" style="margin-top:8px">This transfer's own trip cost (£${tripCostPerRoll.toFixed(4)}/roll) is live — it recalculates if the trip's cost or this transfer's quantity changes, unlike the frozen warehouse-cost rate above.</p>` : ''}
       </div>
       </div>
       <div><div class="card">
         <h2>Transfer value</h2>
-        <div class="summary-line total"><span>Total transferred value</span><span class="mono" id="t-grand-total">${fmt(totalValue)}</span></div>
+        <div class="summary-line"><span>Warehouse cost (frozen rate × current qty)</span><span class="mono">${fmt(warehouseCostTotal)}</span></div>
+        <div class="summary-line"><span>+ This transfer's trip cost (live)</span><span class="mono">${fmt(tripCostTotal)}</span></div>
+        <div class="summary-line total"><span>= Total transferred value</span><span class="mono" id="t-grand-total">${fmt(grandTotal)}</span></div>
       </div></div>
     </div>`;
 
@@ -959,7 +985,8 @@ function renderTransferDetail(){
     transferTarget.items[idx].quantity = +e.target.value || 0;
     const lineTotal = (transferTarget.items[idx].transfer_cost_per_roll_gbp||0) * transferTarget.items[idx].quantity;
     document.getElementById('t-line-total-'+idx).textContent = fmt(lineTotal);
-    document.getElementById('t-grand-total').textContent = fmt(transferTarget.items.reduce((s,it)=>s+((it.transfer_cost_per_roll_gbp||0)*(it.quantity||0)),0));
+    // re-render fully on quantity change so the live trip-cost total updates too, not just the warehouse-cost line
+    renderTransferDetail();
   }));
   el.querySelectorAll('[data-remove]').forEach(b=>b.addEventListener('click', e=>{
     const idx = +e.target.dataset.remove;
@@ -967,6 +994,23 @@ function renderTransferDetail(){
     if(removed.id) transferTarget._deletedItemIds = [...(transferTarget._deletedItemIds||[]), removed.id];
     renderTransferDetail();
   }));
+
+  const tripSelect = document.getElementById('t-delivery-trip');
+  const newTripFields = document.getElementById('t-new-trip-fields');
+  tripSelect.addEventListener('change', e=>{
+    newTripFields.style.display = e.target.value === '__new__' ? '' : 'none';
+  });
+  sb.from('delivery_trips').select('id,trip_date,total_delivery_partner_cost_gbp,notes')
+    .eq('warehouse_id', t.from_warehouse_id).order('trip_date', {ascending:false})
+    .then(({data})=>{
+      (data||[]).forEach(trip=>{
+        const opt = document.createElement('option');
+        opt.value = trip.id;
+        opt.textContent = `${trip.trip_date} — ${fmt(trip.total_delivery_partner_cost_gbp)}${trip.notes?' ('+trip.notes+')':''}`;
+        if(trip.id === t.delivery_trip_id) opt.selected = true;
+        tripSelect.insertBefore(opt, tripSelect.querySelector('option[value="__new__"]'));
+      });
+    });
 }
 
 async function saveTransferDetail(){
@@ -974,12 +1018,29 @@ async function saveTransferDetail(){
   const saveBtn = document.getElementById('transfer-save');
   saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
   try {
+    const tripChoice = document.getElementById('t-delivery-trip')?.value;
+    let deliveryTripId = t.delivery_trip_id || null;
+    if(tripChoice === '__new__'){
+      const { data: trip, error: tripErr } = await sb.from('delivery_trips').insert({
+        warehouse_id: document.getElementById('t-from').value,
+        trip_date: document.getElementById('t-trip-date').value,
+        total_delivery_partner_cost_gbp: +(document.getElementById('t-trip-cost').value||0),
+        transfer_leg_cost_gbp: +(document.getElementById('t-trip-transfer-leg').value||0),
+        notes: document.getElementById('t-trip-notes').value || null,
+      }).select().single();
+      if(tripErr) throw tripErr;
+      deliveryTripId = trip.id;
+    } else if(tripChoice !== undefined){
+      deliveryTripId = tripChoice || null;
+    }
+
     const { error: tErr } = await sb.from('warehouse_transfers').update({
       reference_no: document.getElementById('t-reference').value || null,
       transfer_date: document.getElementById('t-date').value,
       from_warehouse_id: document.getElementById('t-from').value,
       to_warehouse_id: document.getElementById('t-to').value,
       processed: document.getElementById('t-processed').checked,
+      delivery_trip_id: deliveryTripId,
     }).eq('id', t.id);
     if(tErr) throw tErr;
 
